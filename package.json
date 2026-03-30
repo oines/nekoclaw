@@ -1,0 +1,50 @@
+{
+	"name": "nekoclaw",
+	"version": "0.1.0",
+	"description": "Multi-agent chat runtime built on pi-coding-agent",
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"nekoclaw": "dist/cli.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"docs"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
+		"test": "vitest --run",
+		"check": "tsgo --noEmit -p tsconfig.build.json"
+	},
+	"dependencies": {
+		"@mariozechner/pi-agent-core": "^0.63.1",
+		"@mariozechner/pi-ai": "^0.63.1",
+		"@mariozechner/pi-coding-agent": "^0.63.1",
+		"@sinclair/typebox": "^0.34.48",
+		"chalk": "^5.5.0",
+		"commander": "^14.0.3",
+		"grammy": "^1.41.1",
+		"onebot-client-next": "^1.0.4-prelease.fixed.1",
+		"proper-lockfile": "^4.1.2"
+	},
+	"devDependencies": {
+		"@types/node": "^24.3.0",
+		"shx": "^0.4.0",
+		"typescript": "^5.7.3",
+		"vitest": "^3.2.4"
+	},
+	"engines": {
+		"node": ">=20.6.0"
+	}
+}

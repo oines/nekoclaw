@@ -1,0 +1,32 @@
+node_modules/
+dist/
+coverage/
+.vite/
+*.log
+.DS_Store
+
+# Local development
+.claude/
+.env
+.env.local
+.vscode/
+.idea/
+
+# Nekoclaw specific
+/chats/
+/skills/*/
+!/assets/skills/
+SOUL.md
+MEMORY.md
+/workspace/
+/.nekoclaw-runtime/
+context.jsonl
+config.json
+agents.json
+channels.json
+models.json
+sessions.json
+pairs.json
+audit.json
+*.db
+*.sqlite

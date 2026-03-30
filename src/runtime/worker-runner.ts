@@ -1,0 +1,127 @@
+import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
+import { hasOutboundContent } from "../messages.js";
+import { MODEL_ENV_MAP } from "../model/provider-key.js";
+import { JsonNekoclawStore } from "../store/json-store.js";
+import type { AgentSpec, ChannelPlugin, RunJob, WorkerPayload, WorkerResult } from "../types.js";
+import { runWorkerInContainer } from "./docker.js";
+import { OutboundDispatchService } from "./outbound-dispatch.js";
+import { getRuntimeKey } from "./runtime-key.js";
+
+function parseWorkerResult(stdout: string): WorkerResult {
+	const lines = stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	const line = lines[lines.length - 1];
+	if (!line) {
+		return { outbound: {} };
+	}
+	try {
+		return JSON.parse(line) as WorkerResult;
+	} catch {
+		const preview = lines.slice(-5).join("\n");
+		throw new Error(`Failed to parse worker result. Last 5 lines of stdout:\n${preview}`);
+	}
+}
+
+export class WorkerRunnerService {
+	constructor(
+		private readonly store: JsonNekoclawStore,
+		private readonly outbound: OutboundDispatchService,
+		private readonly channelPlugins: Map<string, ChannelPlugin>,
+		private readonly ensureContainer: (agentRef: string) => Promise<string>,
+	) {}
+
+	async runJob(job: RunJob): Promise<WorkerResult> {
+		const agent = this.store.getAgentByRef(job.agentId);
+		await this.ensureContainer(agent.agentId);
+		const session = this.store.getSession(agent.agentId, job.sessionRecordId);
+		const effectiveModel = session.modelOverride
+			? {
+					provider: session.modelOverride.provider,
+					modelId: session.modelOverride.modelId,
+					thinkingLevel: agent.thinkingLevel,
+				}
+			: agent.provider && agent.modelId
+				? {
+						provider: agent.provider,
+						modelId: agent.modelId,
+						thinkingLevel: agent.thinkingLevel,
+					}
+				: undefined;
+		const plugin = this.channelPlugins.get(getRuntimeKey(agent.agentId, session.channelType));
+		const payload: WorkerPayload = {
+			agent,
+			job,
+			currentSession: session,
+			capabilities: plugin?.capabilities ?? { text: true, media: false, reply: false, edit: false, delete: false, typing: false },
+			selfIdentity: this.getSelfIdentity(plugin, job),
+			effectiveModel,
+		};
+
+		let typingInterval: NodeJS.Timeout | undefined;
+		if (plugin?.capabilities?.typing && plugin.actions) {
+			const sendTyping = () => {
+				plugin.actions.typing({ chatId: session.externalConversationId }).catch(() => {});
+			};
+			sendTyping();
+			typingInterval = setInterval(sendTyping, 4000);
+		}
+
+		try {
+			const stdout = await runWorkerInContainer(agent.containerName, `${JSON.stringify(payload)}\n`, this.getWorkerEnv(agent));
+			const result = parseWorkerResult(stdout);
+			if (result.toolActions?.length) {
+				await this.outbound.executeToolActions(agent, session, result.toolActions);
+			}
+			if (hasOutboundContent(result.outbound)) {
+				await this.outbound.sendToSession(agent, session, job.event, result.outbound);
+			}
+			return result;
+		} finally {
+			if (typingInterval) {
+				clearInterval(typingInterval);
+			}
+		}
+	}
+
+	private getWorkerEnv(agent: AgentSpec): Record<string, string | undefined> {
+		const env: Record<string, string | undefined> = {};
+		if (!agent.provider) {
+			return env;
+		}
+		if (this.store.getModelConfig(agent.agentId)?.kind === "custom") {
+			env[NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV] = this.store.getCustomModelApiKey(agent.agentId);
+			return env;
+		}
+		const envName = MODEL_ENV_MAP[agent.provider];
+		const providerKey = this.store.getProviderKey(agent.agentId, agent.provider);
+		if (envName && providerKey) {
+			env[envName] = providerKey;
+		}
+		return env;
+	}
+
+	private getSelfIdentity(plugin: ChannelPlugin | undefined, job: RunJob): WorkerPayload["selfIdentity"] {
+		const botIdentity = plugin?.botIdentity;
+		const botUsername = botIdentity?.username?.toLowerCase();
+		const botUserId = botIdentity?.userId;
+		const isBotMentionedByUsername = botUsername
+			? job.event.mentionedUsernames?.some((u) => u.toLowerCase() === botUsername) ?? false
+			: false;
+		const isBotMentionedById = botUserId
+			? job.event.mentionedUserIds?.includes(botUserId) ?? false
+			: false;
+		const identity: NonNullable<WorkerPayload["selfIdentity"]> = {
+			isExplicitlyAddressed:
+				Boolean(job.event.replyToMessageId) || isBotMentionedByUsername || isBotMentionedById,
+		};
+		if (botUsername) {
+			identity.telegramHandles = [`@${botUsername}`];
+		}
+		if (botUserId) {
+			identity.platformUserId = botUserId;
+		}
+		return identity;
+	}
+}
