@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import {
 	AuthStorage,
 	codingTools,
@@ -9,7 +9,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@mariozechner/pi-coding-agent";
-import type { AssistantMessage, ImageContent } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, UserMessage } from "@mariozechner/pi-ai";
 import { summarizeBlocks } from "../messages.js";
 import { readTextFile } from "../store/fs.js";
 import { createToolComposition } from "../tools/index.js";
@@ -17,26 +17,50 @@ import type { ChannelToolAction, WorkerPayload, WorkerResult } from "../types.js
 
 const WORKSPACE_DIR = "/workspace";
 
-export function collectPromptImages(payload: WorkerPayload, workspaceDir: string): ImageContent[] {
+export function collectPromptImages(
+	payload: WorkerPayload,
+	workspaceDir: string,
+	recentHistory: (UserMessage | AssistantMessage)[],
+): ImageContent[] {
 	const images: ImageContent[] = [];
-	for (const block of payload.job.event.blocks) {
-		if (block.kind !== "image" || !block.attachment?.relativePath) {
-			continue;
+	const seenPaths = new Set<string>();
+
+	function addImage(relativePath: string, mimeType?: string) {
+		const absolutePath = join(workspaceDir, relativePath);
+		if (!seenPaths.has(absolutePath) && existsSync(absolutePath)) {
+			seenPaths.add(absolutePath);
+			images.push({
+				type: "image",
+				data: readFileSync(absolutePath).toString("base64"),
+				mimeType: mimeType || "image/jpeg",
+			});
 		}
-		const mimeType = block.attachment.mimeType ?? block.mimeType;
-		if (!mimeType?.startsWith("image/")) {
-			continue;
-		}
-		const absolutePath = join(workspaceDir, block.attachment.relativePath);
-		if (!existsSync(absolutePath)) {
-			continue;
-		}
-		images.push({
-			type: "image",
-			data: readFileSync(absolutePath).toString("base64"),
-			mimeType,
-		});
 	}
+
+	// 1. Scan current message blocks
+	for (const block of payload.job.event.blocks) {
+		if (block.kind === "image" && block.attachment?.relativePath) {
+			addImage(block.attachment.relativePath, block.attachment.mimeType ?? block.mimeType);
+		}
+	}
+
+	// 2. If current turn has no images, or for better context, scan recent history (last 5 messages)
+	// This helps when user says "what's in that picture?" in the next turn.
+	if (images.length === 0) {
+		const contextSearchRange = recentHistory.slice(-5);
+		for (const msg of contextSearchRange) {
+			if (msg.role === "user" && typeof msg.content === "string") {
+				// Look for path patterns in the summarized text blocks like "Image: attachments/..."
+				const matches = msg.content.matchAll(/Image: ([^\n\s]+\.(?:jpg|jpeg|png|webp|gif))/gi);
+				for (const match of matches) {
+					if (match[1]) {
+						addImage(match[1]);
+					}
+				}
+			}
+		}
+	}
+
 	return images;
 }
 
@@ -83,7 +107,7 @@ ${memory.trim() || "(empty)"}`;
 
 
 
-function buildPrompt(payload: WorkerPayload): string {
+function buildPrompt(payload: WorkerPayload, hasImages: boolean): string {
 	const sender = [payload.job.event.sender.displayName, payload.job.event.sender.externalId].filter(Boolean).join(" / ");
 	const lines = [
 		payload.job.event.eventType ? `Event: ${payload.job.event.eventType}` : undefined,
@@ -92,6 +116,9 @@ function buildPrompt(payload: WorkerPayload): string {
 		"Content:",
 		...summarizeBlocks(payload.job.event.blocks),
 	];
+	if (hasImages) {
+		lines.push("\n[VISUAL DATA ATTACHED: Use your vision capabilities to analyze the provided image(s) above.]");
+	}
 	return lines.filter(Boolean).join("\n");
 }
 
@@ -200,8 +227,18 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	});
 	overrideSessionPrompt(session, finalSystemPrompt);
 	await bindPrintModeExtensions(session);
-	const images = collectPromptImages(payload, WORKSPACE_DIR);
-	await session.prompt(buildPrompt(payload), images.length > 0 ? { images } : undefined);
+
+	// Get images from current message or recent history
+	const recentMessages = (session.state.messages || []) as (UserMessage | AssistantMessage)[];
+	const images = collectPromptImages(payload, WORKSPACE_DIR, recentMessages);
+
+	let finalUserPrompt = buildPrompt(payload, images.length > 0);
+	if (images.length > 0) {
+		finalUserPrompt +=
+			"\n\n[SYSTEM HINT: I've loaded image pixel data into your vision channel for the images referenced above. Analyze them directly. DO NOT try to 'read()' binary JPG/PNG files using coding tools as they will only show you binary/base64 junk.]";
+	}
+
+	await session.prompt(finalUserPrompt, images.length > 0 ? { images } : undefined);
 
 	const responseText = getLastAssistantText(payload, session.state);
 	const lastMessage = session.state.messages[session.state.messages.length - 1];
