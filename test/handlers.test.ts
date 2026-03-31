@@ -134,8 +134,10 @@ describe("nekoclaw handlers", () => {
 			.flatMap((call) => call.map((value) => String(value)))
 			.join("\n");
 		expect(output).toContain("Added admin telegram/999 to ops-cat");
-		expect(output).toContain("CHANNEL\tUSER ID\tDISPLAY NAME\tADDED AT");
-		expect(output).toContain("telegram\t999");
+		expect(output).toContain("CHANNEL");
+		expect(output).toContain("USER ID");
+		expect(output).toContain("telegram");
+		expect(output).toContain("999");
 		expect(output).toContain("Removed admin telegram/999 from ops-cat");
 		expect(store.listAdmins(agent.agentId)).toHaveLength(0);
 	});

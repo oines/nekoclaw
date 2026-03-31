@@ -21,6 +21,8 @@ export async function handleAdminAdd(
 	console.log(chalk.green(`Added admin ${admin.channelType}/${admin.externalUserId} to ${agent.slug}`));
 }
 
+import Table from "cli-table3";
+
 export async function handleAdminList(agentRef: string, store: JsonNekoclawStore): Promise<void> {
 	const agent = store.getAgentByRef(requireValue(agentRef, "agent"));
 	const admins = store.listAdmins(agent.agentId);
@@ -28,10 +30,14 @@ export async function handleAdminList(agentRef: string, store: JsonNekoclawStore
 		console.log("No admins configured.");
 		return;
 	}
-	console.log("CHANNEL\tUSER ID\tDISPLAY NAME\tADDED AT");
+	const table = new Table({
+		head: ["CHANNEL", "USER ID", "DISPLAY NAME", "ADDED AT"].map((h) => chalk.bold(h)),
+		chars: { mid: "", "left-mid": "", "mid-mid": "", "right-mid": "" },
+	});
 	for (const admin of admins) {
-		console.log(`${admin.channelType}\t${admin.externalUserId}\t${admin.displayName ?? "-"}\t${admin.addedAt}`);
+		table.push([admin.channelType, admin.externalUserId, admin.displayName ?? "-", admin.addedAt]);
 	}
+	console.log(table.toString());
 }
 
 export async function handleAdminRemove(
@@ -96,33 +102,126 @@ export async function handleStatus(store: JsonNekoclawStore): Promise<void> {
 	);
 }
 
-export async function handleQuickstart(store: JsonNekoclawStore, options: QuickstartOptions): Promise<void> {
-	const { ask } = await import("./shared.js");
-	const slug = options.name || (await ask("Agent name"));
-	const agent = store.createAgent({ slug });
-	console.log(chalk.green(`Created agent "${agent.slug}"`));
+import * as p from "@clack/prompts";
+import { handleRuntimeStart } from "./runtime.js";
+import { handleAgentEnable } from "./agent.js";
+import { NekoclawDaemon } from "../../runtime/daemon.js";
 
-	const modelMode =
-		options.source ||
+export async function handleQuickstart(store: JsonNekoclawStore, options: QuickstartOptions): Promise<void> {
+	const isInteractive = process.stdout.isTTY;
+	p.intro(chalk.bgCyan.black(` ${NEKOCLAW_NAME} Quickstart `));
+
+	const slug = (options.name ||
+		(await p.text({
+			message: "What is your agent's name?",
+			placeholder: "cat-agent",
+			validate: (v) => (!v ? "Name is required" : undefined),
+		}))) as string;
+
+	if (p.isCancel(slug)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const agent = store.createAgent({ slug });
+	p.log.success(`Created agent workspace for "${agent.slug}"`);
+
+	const modelMode = (options.source ||
 		(options.baseUrl ? "custom" : options.provider ? "built-in" : undefined) ||
-		(await ask("Model source (built-in/custom)", "built-in"));
+		(await p.select({
+			message: "Select model source",
+			options: [
+				{ value: "built-in", label: "Built-in (OpenAI, Anthropic, etc.)" },
+				{ value: "custom", label: "Custom (Self-hosted or Proxy)" },
+			],
+		}))) as string;
+
+	if (p.isCancel(modelMode)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
 	if (modelMode === "custom") {
 		await configureCustomModel(agent.agentId, store, options);
 	} else {
 		await configureBuiltInModel(agent.agentId, store, options);
 	}
 
-	if (store.listChannels(agent.agentId).length === 0) {
-		store.createChannel(agent.agentId, "telegram");
-		console.log(chalk.green("Added Telegram channel"));
+	let channels: string[] = [];
+	if (options.token) {
+		channels = ["telegram"];
+	} else if (isInteractive) {
+		const selected = (await p.multiselect({
+			message: "Which channels would you like to add?",
+			options: [
+				{ value: "telegram", label: "Telegram", hint: "Connect via Bot Token" },
+				{ value: "napcat", label: "NapCat (QQ)", hint: "Connect via OneBot WebSocket" },
+			],
+			required: false,
+		})) as string[];
+
+		if (p.isCancel(selected)) {
+			p.cancel("Operation cancelled");
+			return;
+		}
+		channels = selected;
 	}
 
-	const token = options.token || (await ask("Telegram bot token"));
-	if (token) {
-		store.setChannelToken(agent.agentId, "telegram", token);
-		console.log(chalk.green("Saved Telegram token"));
+	for (const type of channels) {
+		store.createChannel(agent.agentId, type as ChannelType);
+		p.log.success(`Added ${type} channel`);
+
+		if (type === "telegram") {
+			const token = (options.token ||
+				(await p.password({
+					message: "Enter Telegram Bot Token",
+					validate: (v) => (!v ? "Token is required for Telegram" : undefined),
+				}))) as string;
+			if (!p.isCancel(token)) {
+				store.setChannelToken(agent.agentId, "telegram", token);
+			}
+		} else if (type === "napcat") {
+			const wsUrl = (await p.text({
+				message: "Enter NapCat WebSocket URL",
+				placeholder: "ws://localhost:3001",
+				validate: (v) => (!v ? "URL is required for NapCat" : undefined),
+			})) as string;
+			const selfId = (await p.text({
+				message: "Enter your Bot's QQ ID",
+				validate: (v) => (!v ? "QQ ID is required for NapCat" : undefined),
+			})) as string;
+			if (!p.isCancel(wsUrl) && !p.isCancel(selfId)) {
+				store.setNapcatEndpoint(agent.agentId, { wsUrl, selfId });
+			}
+		}
 	}
 
-	console.log(chalk.bold("\nNext step"));
-	console.log(`${NEKOCLAW_NAME} agent enable ${agent.slug}`);
+	const startDaemon = isInteractive
+		? await p.confirm({
+				message: "Would you like to start the background runtime daemon now?",
+				initialValue: true,
+			})
+		: false;
+
+	if (startDaemon === true) {
+		const s = p.spinner();
+		s.start("Starting daemon...");
+		await handleRuntimeStart(store);
+		s.stop("Daemon started");
+	}
+
+	const enableAgent = isInteractive
+		? await p.confirm({
+				message: `Would you like to enable agent "${agent.slug}" now?`,
+				initialValue: true,
+			})
+		: false;
+
+	if (enableAgent === true) {
+		const daemon = new NekoclawDaemon(store);
+		await handleAgentEnable(agent.agentId, store, daemon);
+		p.log.success(`Agent "${agent.slug}" enabled and ready!`);
+	}
+
+	p.outro(chalk.cyan("Quickstart complete! Have fun chatting."));
 }

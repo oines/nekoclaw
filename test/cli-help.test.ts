@@ -88,7 +88,7 @@ describe("nekoclaw cli help", () => {
 			);
 
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain('Created agent "cat-agent"');
+			expect(result.stdout).toContain('Created agent workspace for "cat-agent"');
 			expect(result.stdout).not.toContain("Usage: nekoclaw quickstart");
 		} finally {
 			rmSync(tempHome, { recursive: true, force: true });
