@@ -66,6 +66,8 @@ export async function handleChannelRemove(agentRef: string, type: ChannelType | 
 	console.log(chalk.green(`Removed ${resolvedType} channel from ${store.getAgentByRef(agentRef).slug}`));
 }
 
+import Table from "cli-table3";
+
 export async function handleChannelList(agentRef: string, store: JsonNekoclawStore): Promise<void> {
 	const agent = store.getAgentByRef(agentRef);
 	const channels = store.listChannels(agent.agentId);
@@ -73,18 +75,27 @@ export async function handleChannelList(agentRef: string, store: JsonNekoclawSto
 		console.log(`No channels configured. Run: ${NEKOCLAW_NAME} channel add ${agent.slug} telegram`);
 		return;
 	}
+	const table = new Table({
+		head: ["TYPE", "CONFIGURED", "ENDPOINT", "SELF ID", "GROUP TRIGGER"].map((h) => chalk.bold(h)),
+		chars: { mid: "", "left-mid": "", "mid-mid": "", "right-mid": "" },
+	});
 	for (const channel of channels) {
-		const tokenSaved = store.getChannelToken(channel.agentId, channel.type) ? "yes" : "no";
+		const tokenSaved = store.getChannelToken(channel.agentId, channel.type) ? chalk.green("yes") : chalk.yellow("no");
 		if (channel.type === "napcat") {
 			const config = store.getNapcatChannelConfig(channel.agentId);
-			console.log(
-				`${channel.type}\tconfigured=${tokenSaved}\tendpoint=${config?.wsUrl ? "yes" : "no"}\tself-id=${config?.selfId ?? "-"}\tgroup-trigger=${config?.groupTrigger ?? "all"}`,
-			);
+			table.push([
+				channel.type,
+				tokenSaved,
+				config?.wsUrl ? chalk.green("yes") : chalk.yellow("no"),
+				config?.selfId ?? "-",
+				config?.groupTrigger ?? "all",
+			]);
 			continue;
 		}
 		const config = store.getTelegramChannelConfig(channel.agentId);
-		console.log(`${channel.type}\tconfigured=${tokenSaved}\tgroup-trigger=${config?.groupTrigger ?? "all"}`);
+		table.push([channel.type, tokenSaved, "-", "-", config?.groupTrigger ?? "all"]);
 	}
+	console.log(table.toString());
 }
 
 export async function handleChannelToken(agentRef: string, type: ChannelType | undefined, options: ChannelTokenOptions, store: JsonNekoclawStore): Promise<void> {

@@ -116,11 +116,22 @@ export function providerNames(): string[] {
 	];
 }
 
+import * as p from "@clack/prompts";
+
 export async function configureBuiltInModel(agentRef: string, store: JsonNekoclawStore, options: ModelSetOptions): Promise<void> {
 	const agent = store.getAgentByRef(agentRef);
-	const provider =
-		options.provider ||
-		(await ask(`Provider (${providerNames().join(", ")})`, agent.provider || "openai"));
+	const provider = (options.provider ||
+		(await p.select({
+			message: "Select a model provider",
+			options: providerNames().map((p) => ({ value: p, label: p })),
+			initialValue: agent.provider || "openai",
+		}))) as string;
+
+	if (p.isCancel(provider)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
 	const registry = createRegistry(agent, store);
 	const availableModels = uniqueSorted(
 		registry
@@ -129,62 +140,139 @@ export async function configureBuiltInModel(agentRef: string, store: JsonNekocla
 			.map((model) => model.id),
 	);
 	const fallbackModel = availableModels[0] ?? "";
-	const modelId =
-		options.model ||
-		(await ask(
-			availableModels.length > 0
-				? `Model (${availableModels.join(", ")})`
-				: "Model",
-			agent.provider === provider ? agent.modelId : fallbackModel,
-		));
-	const apiKey = options.apiKey ?? (await ask("API key (saved to local config, leave empty if none)", ""));
+	const modelId = (options.model ||
+		(await p.select({
+			message: "Select a model",
+			options: availableModels.length > 0
+				? availableModels.map((m) => ({ value: m, label: m }))
+				: [{ value: "custom", label: "Enter model ID manually" }],
+			initialValue: agent.provider === provider ? agent.modelId : fallbackModel,
+		}))) as string;
+
+	if (p.isCancel(modelId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const finalModelId = modelId === "custom"
+		? (await p.text({ message: "Enter model ID" })) as string
+		: modelId;
+
+	if (p.isCancel(finalModelId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const apiKey = (options.apiKey ??
+		(await p.password({
+			message: "Enter API key (leave empty if already set or not needed)",
+		}))) as string;
+
+	if (p.isCancel(apiKey)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
 	store.setBuiltinModelConfig(agent.agentId, {
 		provider,
-		modelId,
+		modelId: finalModelId,
 		apiKey: apiKey || undefined,
 		thinkingLevel: agent.thinkingLevel,
 	});
-	console.log(chalk.green(`Model updated for ${agent.slug}`));
-	console.log(`Current model: ${provider}/${modelId}`);
+	p.note(`Current model: ${provider}/${finalModelId}`, chalk.green("Model updated"));
 }
 
 export async function configureCustomModel(agentRef: string, store: JsonNekoclawStore, options: ModelSetOptions): Promise<void> {
 	const agent = store.getAgentByRef(agentRef);
-	const baseUrl = options.baseUrl || (await ask("Model URL"));
-	const providerId = requireValue(options.providerId?.trim(), "provider ID (--provider-id)");
-	const apiKey = options.apiKey || (await ask("API key (leave empty if none)", ""));
+	const baseUrl = (options.baseUrl || (await p.text({
+		message: "Enter custom model base URL",
+		placeholder: "https://api.openai.com/v1",
+		validate: (v) => (!v ? "Base URL is required" : undefined),
+	}))) as string;
+
+	if (p.isCancel(baseUrl)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const providerId = (options.providerId || (await p.text({
+		message: "Enter custom provider ID",
+		placeholder: "my-provider",
+		validate: (v) => (!v ? "Provider ID is required" : undefined),
+	}))) as string;
+
+	if (p.isCancel(providerId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const apiKey = (options.apiKey || (await p.password({
+		message: "Enter API key (leave empty if none)",
+	}))) as string;
+
+	if (p.isCancel(apiKey)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const s = p.spinner();
+	s.start("Fetching available models...");
 	const listedModels = await fetchCustomModelIds(baseUrl, apiKey || undefined);
-	const modelId =
-		options.model ||
-		(await ask(
-			listedModels.length > 0 ? `Model (${listedModels.join(", ")})` : "Model name",
-			listedModels[0],
-		));
+	s.stop("Model list fetched");
+
+	const modelId = (options.model ||
+		(await p.select({
+			message: "Select a model",
+			options: listedModels.length > 0
+				? listedModels.map((m) => ({ value: m, label: m }))
+				: [{ value: "manual", label: "Enter model ID manually" }],
+			initialValue: listedModels[0],
+		}))) as string;
+
+	if (p.isCancel(modelId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const finalModelId = modelId === "manual"
+		? (await p.text({ message: "Enter model ID", validate: (v) => (!v ? "Model ID is required" : undefined) })) as string
+		: modelId;
+
+	if (p.isCancel(finalModelId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	s.start("Probing model endpoint...");
 	const probe = await probeProxyProtocol({
 		baseUrl,
 		apiKey: apiKey || "",
-		modelId,
+		modelId: finalModelId,
 	});
+	s.stop("Probe successful");
+
 	const updatedAgent = store.setCustomModelConfig(agent.agentId, {
 		baseUrl: baseUrl.replace(/\/+$/, ""),
 		api: probe.api,
 		providerId,
-		modelId,
+		modelId: finalModelId,
 		apiKey: apiKey || undefined,
 		thinkingLevel: agent.thinkingLevel,
 	});
+
 	if (!updatedAgent.provider) {
 		throw new Error(`Custom provider ID was not assigned for ${updatedAgent.slug}`);
 	}
-	const config = buildCustomRuntimeConfig(baseUrl, probe.api, updatedAgent.provider, modelId);
+
+	const config = buildCustomRuntimeConfig(baseUrl, probe.api, updatedAgent.provider, finalModelId);
 	store.writeRuntimeModelsConfig(updatedAgent.agentId, config, {
 		baseUrl,
 		api: probe.api,
 		providerId: updatedAgent.provider,
-		modelId,
+		modelId: finalModelId,
 	});
-	console.log(chalk.green(`Model updated for ${agent.slug}`));
-	console.log(`Current model: ${updatedAgent.provider}/${modelId}`);
+
+	p.note(`Current model: ${updatedAgent.provider}/${finalModelId}`, chalk.green("Model updated"));
 }
 
 export async function handleModelCurrent(agentRef: string, store: JsonNekoclawStore): Promise<void> {

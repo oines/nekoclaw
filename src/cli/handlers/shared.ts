@@ -73,20 +73,3 @@ export async function ask(question: string, fallback?: string): Promise<string> 
 	rl.close();
 	return answer || fallback || "";
 }
-
-export function printAgentRow(agent: AgentSpec, store: JsonNekoclawStore): void {
-	const channels = store.listChannels(agent.agentId).length;
-	const sessions = store.listSessions(agent.agentId).length;
-	const model = agent.provider && agent.modelId ? `${agent.provider}/${agent.modelId}` : "-";
-	const enabled = agent.enabled ? "yes" : "no";
-	console.log(`${agent.slug}\t${enabled}\t${model}\t${channels}\t${sessions}\t${agent.lastError ?? "-"}`);
-}
-
-export function printAgentStatus(agent: AgentSpec, store: JsonNekoclawStore): void {
-	console.log(chalk.bold(agent.slug));
-	console.log(`  Enabled: ${agent.enabled ? "yes" : "no"}`);
-	console.log(`  Model: ${agent.provider && agent.modelId ? `${agent.provider}/${agent.modelId}` : "not set"}`);
-	console.log(`  Channels: ${store.listChannels(agent.agentId).length}`);
-	console.log(`  Sessions: ${store.listSessions(agent.agentId).length}`);
-	console.log(`  Last error: ${agent.lastError ?? "-"}`);
-}

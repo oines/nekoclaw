@@ -3,8 +3,10 @@ import { NekoclawDaemon } from "../../runtime/daemon.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import { NEKOCLAW_NAME } from "../../config.js";
 import type { AgentSpec } from "../../types.js";
-import { ask, printAgentRow, printAgentStatus, requireValue, type AgentCreateOptions, type ForceOptions } from "./shared.js";
+import * as p from "@clack/prompts";
+import { ask, requireValue, type AgentCreateOptions, type ForceOptions } from "./shared.js";
 import { requestBackgroundRuntimeRemoval } from "./runtime.js";
+import Table from "cli-table3";
 
 function getModelConfig(agent: AgentSpec, store: JsonNekoclawStore) {
 	return store.getModelConfig(agent.agentId);
@@ -48,12 +50,24 @@ export function collectReadinessIssues(agent: AgentSpec, store: JsonNekoclawStor
 	return issues;
 }
 
+export function printAgentStatus(agent: AgentSpec, store: JsonNekoclawStore): void {
+	p.note(
+		`Enabled: ${agent.enabled ? chalk.green("yes") : chalk.yellow("no")}
+Model: ${agent.provider && agent.modelId ? `${agent.provider}/${agent.modelId}` : chalk.red("not set")}
+Channels: ${store.listChannels(agent.agentId).length}
+Sessions: ${store.listSessions(agent.agentId).length}
+Last error: ${agent.lastError ?? "-"}`,
+		chalk.bold(agent.slug),
+	);
+}
+
 export async function handleAgentCreate(name: string, _options: AgentCreateOptions, store: JsonNekoclawStore): Promise<void> {
 	const agent = store.createAgent({
 		slug: requireValue(name, "agent name"),
 	});
+	p.log.success(`Created agent workspace for "${agent.slug}"`);
 	printAgentStatus(agent, store);
-	console.log(`Next: ${NEKOCLAW_NAME} model set ${agent.slug}`);
+	p.note(`${NEKOCLAW_NAME} model set ${agent.slug}`, "Next step");
 }
 
 export async function handleAgentList(store: JsonNekoclawStore): Promise<void> {
@@ -62,10 +76,21 @@ export async function handleAgentList(store: JsonNekoclawStore): Promise<void> {
 		console.log(`No agents yet. Run: ${NEKOCLAW_NAME} quickstart`);
 		return;
 	}
-	console.log("NAME\tENABLED\tMODEL\tCHANNELS\tSESSIONS\tLAST ERROR");
+
+	const table = new Table({
+		head: ["NAME", "ENABLED", "MODEL", "CHANNELS", "SESSIONS", "LAST ERROR"].map((h) => chalk.bold(h)),
+		chars: { mid: "", "left-mid": "", "mid-mid": "", "right-mid": "" },
+	});
+
 	for (const agent of agents) {
-		printAgentRow(agent, store);
+		const channels = store.listChannels(agent.agentId).length;
+		const sessions = store.listSessions(agent.agentId).length;
+		const model = agent.provider && agent.modelId ? `${agent.provider}/${agent.modelId}` : "-";
+		const enabled = agent.enabled ? chalk.green("yes") : chalk.yellow("no");
+		table.push([agent.slug, enabled, model, channels, sessions, agent.lastError ?? "-"]);
 	}
+
+	console.log(table.toString());
 }
 
 export async function handleAgentStatus(agentRef: string, store: JsonNekoclawStore): Promise<void> {
