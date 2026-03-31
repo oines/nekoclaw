@@ -66,10 +66,15 @@ export function isRuntimeAlive(pid: number | undefined): boolean {
 	}
 }
 
+import * as p from "@clack/prompts";
+
 export async function ask(question: string, fallback?: string): Promise<string> {
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
-	const suffix = fallback ? ` [${fallback}]` : "";
-	const answer = (await rl.question(`${question}${suffix}: `)).trim();
-	rl.close();
+	const answer = (await p.text({
+		message: question,
+		initialValue: fallback,
+	})) as string;
+	if (p.isCancel(answer)) {
+		return fallback || "";
+	}
 	return answer || fallback || "";
 }

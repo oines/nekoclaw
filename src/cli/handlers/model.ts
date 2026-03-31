@@ -284,28 +284,45 @@ export async function handleModelCurrent(agentRef: string, store: JsonNekoclawSt
 	console.log(`${agent.provider}/${agent.modelId}`);
 }
 
+import Table from "cli-table3";
+
 export async function handleModelList(agentRef: string, store: JsonNekoclawStore): Promise<void> {
 	const agent = store.getAgentByRef(requireValue(agentRef, "agent"));
 	if (!agent.provider) {
 		throw new Error("This agent does not have a model provider yet. Run model set first.");
 	}
+
+	let ids: string[] = [];
 	if (isCustomModel(agent, store)) {
 		const config = store.readRuntimeModelsConfig(agent.agentId) as unknown as RuntimeModelsConfig | undefined;
 		const provider = getCustomRuntimeProviderConfig(config, agent.provider);
-		const ids = uniqueSorted((provider?.models ?? []).map((entry) => entry.id).filter(Boolean) as string[]);
-		if (ids.length === 0) {
-			console.log("This custom model source does not expose a model list.");
-			return;
-		}
-		for (const id of ids) {
-			console.log(`${id}${id === agent.modelId ? "  (current)" : ""}`);
-		}
+		ids = uniqueSorted((provider?.models ?? []).map((entry) => entry.id).filter(Boolean) as string[]);
+	} else {
+		const registry = createRegistry(agent, store);
+		ids = uniqueSorted(
+			registry
+				.getAll()
+				.filter((model) => model.provider === agent.provider)
+				.map((model) => model.id),
+		);
+	}
+
+	if (ids.length === 0) {
+		console.log("No models found for this provider.");
 		return;
 	}
-	const registry = createRegistry(agent, store);
-	for (const id of uniqueSorted(registry.getAll().filter((model) => model.provider === agent.provider).map((model) => model.id))) {
-		console.log(`${id}${id === agent.modelId ? "  (current)" : ""}`);
+
+	const table = new Table({
+		head: ["MODEL ID", "STATUS"].map((h) => chalk.bold(h)),
+		chars: { mid: "", "left-mid": "", "mid-mid": "", "right-mid": "" },
+	});
+
+	for (const id of ids) {
+		const isCurrent = id === agent.modelId;
+		table.push([isCurrent ? chalk.cyan(id) : id, isCurrent ? chalk.green("current") : "-"]);
 	}
+
+	console.log(table.toString());
 }
 
 export async function handleModelSet(agentRef: string, options: ModelSetOptions, store: JsonNekoclawStore): Promise<void> {

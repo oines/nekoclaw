@@ -4,6 +4,8 @@ import type { PairCodeOptions, PairListOptions } from "./shared.js";
 import { requireValue } from "./shared.js";
 import { directSendToChannel } from "./channel.js";
 
+import Table from "cli-table3";
+
 export async function handlePairList(options: PairListOptions, store: JsonNekoclawStore): Promise<void> {
 	const agentId = options.agent ? store.getAgentByRef(options.agent).agentId : undefined;
 	const pairs = store.listPairRequests(agentId);
@@ -11,11 +13,21 @@ export async function handlePairList(options: PairListOptions, store: JsonNekocl
 		console.log("No pending pair requests.");
 		return;
 	}
-	console.log("CODE\tAGENT\tCHANNEL\tTYPE\tFROM\tSTATUS");
+	const table = new Table({
+		head: ["CODE", "AGENT", "CHANNEL", "TYPE", "FROM", "STATUS"].map((h) => chalk.bold(h)),
+		chars: { mid: "", "left-mid": "", "mid-mid": "", "right-mid": "" },
+	});
 	for (const pair of pairs) {
 		const agent = store.getAgentByRef(pair.agentId);
-		console.log(`${pair.code}\t${agent.slug}\t${pair.channelType}\t${pair.chatKind}\t${pair.senderName ?? "-"}\t${pair.status}`);
+		const status =
+			pair.status === "accepted"
+				? chalk.green(pair.status)
+				: pair.status === "rejected"
+					? chalk.red(pair.status)
+					: chalk.yellow(pair.status);
+		table.push([pair.code, agent.slug, pair.channelType, pair.chatKind, pair.senderName ?? "-", status]);
 	}
+	console.log(table.toString());
 }
 
 export async function handlePairAccept(options: PairCodeOptions, store: JsonNekoclawStore): Promise<void> {
