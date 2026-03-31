@@ -1,13 +1,46 @@
+import { join } from "node:path";
 import type { ChannelPlugin } from "../types.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
-import type { AgentSpec, ChannelToolAction, InboundMessageEvent, PairRequest, ReplyPayload, SessionRecord } from "../types.js";
+import type {
+	AgentSpec,
+	ChannelToolAction,
+	InboundMessageEvent,
+	PairRequest,
+	ReplyPayload,
+	SessionRecord,
+} from "../types.js";
 import { getRuntimeKey } from "./runtime-key.js";
+import { NEKOCLAW_CONTAINER_WORKSPACE_DIR } from "../config.js";
 
 export class OutboundDispatchService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly channelPlugins: Map<string, ChannelPlugin>,
 	) {}
+
+	private rebasePayload(agent: AgentSpec, payload: ReplyPayload): ReplyPayload {
+		if (!payload.attachments?.length) {
+			return payload;
+		}
+
+		const workspaceRoot = this.store.getWorkspaceRoot(agent.slug);
+		const attachments = payload.attachments.map((attachment) => {
+			const filePath = attachment.filePath;
+			if (filePath && filePath.startsWith(NEKOCLAW_CONTAINER_WORKSPACE_DIR)) {
+				const relativePath = filePath.slice(NEKOCLAW_CONTAINER_WORKSPACE_DIR.length).replace(/^[/\\]+/, "");
+				return {
+					...attachment,
+					filePath: join(workspaceRoot, relativePath),
+				};
+			}
+			return attachment;
+		});
+
+		return {
+			...payload,
+			attachments,
+		};
+	}
 
 	async sendPairAcceptedMessage(pair: PairRequest): Promise<void> {
 		const agent = this.store.getAgentByRef(pair.agentId);
@@ -37,15 +70,21 @@ export class OutboundDispatchService {
 		});
 	}
 
-	async sendToSession(agent: AgentSpec, session: SessionRecord, event: InboundMessageEvent, payload: ReplyPayload): Promise<void> {
+	async sendToSession(
+		agent: AgentSpec,
+		session: SessionRecord,
+		event: InboundMessageEvent,
+		payload: ReplyPayload,
+	): Promise<void> {
 		const channel = this.store.getChannel(agent.agentId, session.channelType);
 		const plugin = this.channelPlugins.get(getRuntimeKey(agent, channel));
 		if (!plugin) {
 			throw new Error(`The ${channel.type} channel is not active for ${agent.slug}`);
 		}
+		const rebasedPayload = this.rebasePayload(agent, payload);
 		await plugin.outbound.send({
 			session,
-			payload,
+			payload: rebasedPayload,
 			event,
 		});
 		this.store.audit(agent.agentId, `${channel.type}.outbound`, {
@@ -68,14 +107,14 @@ export class OutboundDispatchService {
 					await plugin.actions.send({
 						chatId: session.externalConversationId,
 						chatKind: session.chatKind,
-						payload: action.payload,
+						payload: this.rebasePayload(agent, action.payload),
 					});
 					break;
 				case "reply":
 					await plugin.actions.reply({
 						chatId: session.externalConversationId,
 						chatKind: session.chatKind,
-						payload: action.payload,
+						payload: this.rebasePayload(agent, action.payload),
 						replyToId: action.replyToId ?? action.payload.replyToId ?? "",
 					});
 					break;
@@ -107,3 +146,4 @@ export class OutboundDispatchService {
 		});
 	}
 }
+
