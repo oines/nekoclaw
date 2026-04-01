@@ -23,7 +23,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
+		"build": "tsgo -p tsconfig.build.json && shx mkdir -p dist/internal/chat-harness/fixtures && shx cp src/internal/chat-harness/fixtures/* dist/internal/chat-harness/fixtures/ && shx chmod +x dist/cli.js",
 		"test": "vitest --run",
 		"check": "tsgo --noEmit -p tsconfig.build.json"
 	},

@@ -34,21 +34,9 @@ export class WorkerRunnerService {
 
 	async runJob(job: RunJob): Promise<WorkerResult> {
 		const agent = this.store.getAgentByRef(job.agentId);
-		await this.ensureContainer(agent.agentId);
 		const session = this.store.getSession(agent.agentId, job.sessionRecordId);
-		const effectiveModel = session.modelOverride
-			? {
-					provider: session.modelOverride.provider,
-					modelId: session.modelOverride.modelId,
-					thinkingLevel: agent.thinkingLevel,
-				}
-			: agent.provider && agent.modelId
-				? {
-						provider: agent.provider,
-						modelId: agent.modelId,
-						thinkingLevel: agent.thinkingLevel,
-					}
-				: undefined;
+		const effectiveModel = this.resolveEffectiveModel(agent, session, job);
+		await this.ensureContainer(agent.agentId);
 		const plugin = this.channelPlugins.get(getRuntimeKey(agent.agentId, session.channelType));
 		const payload: WorkerPayload = {
 			agent,
@@ -100,6 +88,23 @@ export class WorkerRunnerService {
 			env[envName] = providerKey;
 		}
 		return env;
+	}
+
+	private resolveEffectiveModel(agent: AgentSpec, session: ReturnType<JsonNekoclawStore["getSession"]>, job: RunJob): WorkerPayload["effectiveModel"] {
+		void job;
+		return session.modelOverride
+			? {
+					provider: session.modelOverride.provider,
+					modelId: session.modelOverride.modelId,
+					thinkingLevel: agent.thinkingLevel,
+				}
+			: agent.provider && agent.modelId
+				? {
+						provider: agent.provider,
+						modelId: agent.modelId,
+						thinkingLevel: agent.thinkingLevel,
+					}
+				: undefined;
 	}
 
 	private getSelfIdentity(plugin: ChannelPlugin | undefined, job: RunJob): WorkerPayload["selfIdentity"] {

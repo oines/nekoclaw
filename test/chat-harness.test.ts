@@ -95,6 +95,14 @@ describe("internal chat harness", () => {
 				}
 				return { outbound: { text: "RED,BLUE" } };
 			}
+			if (text.includes("Describe the scene in one short English sentence. Mention TREE, HOUSE, and SUN only if they are actually visible.")) {
+				const imageBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "image" }> => block.kind === "image");
+				expect(imageBlock?.attachment?.relativePath).toBeTruthy();
+				const imagePath = join(context.workspaceRoot, imageBlock!.attachment!.relativePath);
+				expect(existsSync(imagePath)).toBe(true);
+				expect(readFileSync(imagePath).byteLength).toBeGreaterThan(100);
+				return { outbound: { text: "A TREE stands near a HOUSE under the SUN." } };
+			}
 			if (text.includes("Open the attached file and reply with the secret word only.")) {
 				const fileBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "file" }> => block.kind === "file");
 				expect(fileBlock?.attachment?.relativePath).toBeTruthy();
@@ -129,6 +137,14 @@ describe("internal chat harness", () => {
 					},
 				};
 			}
+			if (text.includes("This is a synthetic benchmark image. Read the exact uppercase text printed on the red octagonal road sign. Reply with the sign text only, preserving spaces, and do not add any extra words.")) {
+				const imageBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "image" }> => block.kind === "image");
+				expect(imageBlock?.attachment?.relativePath).toBeTruthy();
+				const imagePath = join(context.workspaceRoot, imageBlock!.attachment!.relativePath);
+				expect(existsSync(imagePath)).toBe(true);
+				expect(readFileSync(imagePath).byteLength).toBeGreaterThan(100);
+				return { outbound: { text: "STOP" } };
+			}
 			return { outbound: { text: "stub response" } };
 		};
 
@@ -141,14 +157,16 @@ describe("internal chat harness", () => {
 				"admin_model_session_override",
 				"dm_image_vision",
 				"dm_multi_image_vision",
+				"dm_natural_image_description",
 				"dm_file_attachment",
 				"dm_multi_file_attachment",
+				"dm_image_text_mixed",
 			],
 			executeJob,
 		});
 
 		expect(report.ok).toBe(true);
-		expect(report.results).toHaveLength(12);
+		expect(report.results).toHaveLength(16);
 		expect(report.results.every((result) => result.status === "passed")).toBe(true);
 		expect(report.results.some((result) => result.channel === "telegram")).toBe(true);
 		expect(report.results.some((result) => result.channel === "napcat")).toBe(true);
