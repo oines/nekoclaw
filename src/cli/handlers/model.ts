@@ -3,7 +3,7 @@ import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV, NEKOCLAW_NAME } from "../../config.js";
 import type { AgentSpec, ModelConfig } from "../../types.js";
 import type { RuntimeModelsConfig } from "../../model/model-types.js";
-import { probeProxyProtocol } from "../../model/probe.js";
+import { probeProxyProtocol, upsertRuntimeModelsConfig } from "../../model/probe.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import { ask, requireValue, type ModelSetOptions } from "./shared.js";
 
@@ -52,47 +52,6 @@ async function fetchCustomModelIds(baseUrl: string, apiKey: string | undefined):
 	}
 	const payload = (await response.json()) as { data?: Array<{ id?: string }> };
 	return uniqueSorted((payload.data ?? []).map((entry) => entry.id).filter(Boolean) as string[]);
-}
-
-function buildCustomRuntimeConfig(
-	baseUrl: string,
-	api: "openai-completions" | "anthropic-messages",
-	providerId: string,
-	modelId: string,
-): RuntimeModelsConfig {
-	return {
-		providers: {
-			[providerId]: {
-				baseUrl: baseUrl.replace(/\/+$/, ""),
-				api,
-				apiKey: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
-				authHeader: api === "openai-completions" ? true : undefined,
-				compat:
-					api === "openai-completions"
-						? {
-								supportsDeveloperRole: false,
-								supportsReasoningEffort: false,
-							}
-						: undefined,
-				models: [
-					{
-						id: modelId,
-						name: modelId,
-						reasoning: false,
-						input: ["text"],
-						contextWindow: 200000,
-						maxTokens: 16384,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-						},
-					},
-				],
-			},
-		},
-	};
 }
 
 export function providerNames(): string[] {
@@ -264,7 +223,13 @@ export async function configureCustomModel(agentRef: string, store: JsonNekoclaw
 		throw new Error(`Custom provider ID was not assigned for ${updatedAgent.slug}`);
 	}
 
-	const config = buildCustomRuntimeConfig(baseUrl, probe.api, updatedAgent.provider, finalModelId);
+	const config = upsertRuntimeModelsConfig(store.readRuntimeModelsConfig(updatedAgent.agentId) as RuntimeModelsConfig | undefined, {
+		baseUrl,
+		api: probe.api,
+		provider: updatedAgent.provider,
+		apiKeyEnv: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
+		modelId: finalModelId,
+	});
 	store.writeRuntimeModelsConfig(updatedAgent.agentId, config, {
 		baseUrl,
 		api: probe.api,

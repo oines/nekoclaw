@@ -1,6 +1,7 @@
 import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { parseAddressedSlashCommand } from "../command-parsing.js";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
+import { upsertRuntimeModelsConfig } from "../model/probe.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
 import type {
 	AgentSpec,
@@ -320,39 +321,15 @@ export class CommandRouterService {
 		modelConfig: Extract<ModelConfig, { kind: "custom" }>,
 		modelId: string,
 	): void {
-		const current = (this.store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig | undefined) ?? { providers: {} };
-		const providers = { ...(current.providers ?? {}) };
-		const providerConfig = {
-			...(providers[modelConfig.providerId] ?? {
-				baseUrl: modelConfig.baseUrl,
-				api: modelConfig.api,
-				apiKey: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
-				authHeader: modelConfig.api === "openai-completions" ? true : undefined,
-			}),
-		};
-		const existingModels = Array.isArray(providerConfig.models) ? [...providerConfig.models] : [];
-		if (!existingModels.some((entry) => entry.id === modelId)) {
-			const template = existingModels[0] ?? {
-				reasoning: false,
-				input: ["text"],
-				contextWindow: 200000,
-				maxTokens: 16384,
-				cost: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-				},
-			};
-			existingModels.push({
-				...template,
-				id: modelId,
-				name: modelId,
-			});
-		}
-		providerConfig.models = existingModels;
-		providers[modelConfig.providerId] = providerConfig;
-		this.store.writeRuntimeModelsConfig(agent.agentId, { ...current, providers }, {
+		const current = this.store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig | undefined;
+		const config = upsertRuntimeModelsConfig(current, {
+			baseUrl: modelConfig.baseUrl,
+			api: modelConfig.api,
+			provider: modelConfig.providerId,
+			apiKeyEnv: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
+			modelId,
+		});
+		this.store.writeRuntimeModelsConfig(agent.agentId, config, {
 			source: "runtime-command",
 			providerId: modelConfig.providerId,
 			modelId,

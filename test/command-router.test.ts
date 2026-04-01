@@ -471,6 +471,86 @@ describe("runtime command router", () => {
 		expect(updatedAgent.modelId).toBe("gpt-5");
 	});
 
+	it("upserts custom runtime models without fabricating metadata", async () => {
+		const { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } = await import("../src/config.js");
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "custom-model-cat" });
+		const agent = store.setCustomModelConfig("custom-model-cat", {
+			baseUrl: "https://proxy.example/v1",
+			api: "openai-completions",
+			providerId: "custom-ai",
+			modelId: "claude-sonnet-4-6",
+			apiKey: "secret-key",
+		});
+		store.addAdmin(agent.agentId, { channelType: "telegram", externalUserId: "42" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "777",
+			chatKind: "dm",
+		});
+		store.writeRuntimeModelsConfig(
+			agent.agentId,
+			{
+				providers: {
+					"custom-ai": {
+						baseUrl: "https://proxy.example/v1",
+						api: "openai-completions",
+						apiKey: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
+						authHeader: true,
+						compat: {
+							supportsDeveloperRole: true,
+						},
+						models: [],
+					},
+				},
+			},
+			{},
+		);
+		const reply = vi.fn(async () => []);
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+
+		await router.handleCommand(
+			store.getAgentByRef(agent.agentId),
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "777",
+				chatKind: "dm",
+				messageId: "205",
+				sender: { externalId: "42" },
+				blocks: [{ kind: "text", text: "/model custom-ai/claude-opus-4-1" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			session,
+		);
+
+		const runtimeConfig = store.readRuntimeModelsConfig(agent.agentId) as {
+			providers: Record<
+				string,
+				{
+					compat?: Record<string, unknown>;
+					models?: Array<Record<string, unknown>>;
+				}
+			>;
+		};
+		const provider = runtimeConfig.providers["custom-ai"];
+		const model = provider.models?.find((entry) => entry.id === "claude-opus-4-1");
+
+		expect(provider.compat).toEqual({ supportsDeveloperRole: true });
+		expect(model).toEqual({
+			id: "claude-opus-4-1",
+			name: "claude-opus-4-1",
+		});
+		expect(model).not.toHaveProperty("contextWindow");
+		expect(model).not.toHaveProperty("maxTokens");
+		expect(model).not.toHaveProperty("cost");
+	});
+
 	it("updates the current channel group trigger through chat commands", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");

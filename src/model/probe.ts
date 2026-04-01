@@ -1,3 +1,4 @@
+import type { RuntimeModelEntry, RuntimeModelProvider, RuntimeModelsConfig } from "./model-types.js";
 import type { ModelApiFormat, ProxyProbeResult } from "../types.js";
 
 interface ProbeOptions {
@@ -119,44 +120,60 @@ export async function probeProxyProtocol(options: ProbeOptions): Promise<ProxyPr
 	throw new Error(`Could not identify proxy protocol.\n${errors.join("\n")}`);
 }
 
-export function buildRuntimeModelsConfig(options: {
+interface RuntimeModelConfigOptions {
 	provider: string;
 	baseUrl: string;
 	api: ModelApiFormat;
 	apiKeyEnv: string;
 	modelId: string;
-}): Record<string, unknown> {
+}
+
+function createRuntimeModelEntry(modelId: string): RuntimeModelEntry {
+	return {
+		id: modelId,
+		name: modelId,
+	};
+}
+
+function createRuntimeModelProvider(options: RuntimeModelConfigOptions): RuntimeModelProvider {
+	return {
+		baseUrl: trimTrailingSlash(options.baseUrl),
+		api: options.api,
+		apiKey: options.apiKeyEnv,
+		authHeader: options.api === "openai-completions" ? true : undefined,
+		models: [createRuntimeModelEntry(options.modelId)],
+	};
+}
+
+export function buildRuntimeModelsConfig(options: RuntimeModelConfigOptions): RuntimeModelsConfig {
 	return {
 		providers: {
-			[options.provider]: {
-				baseUrl: trimTrailingSlash(options.baseUrl),
-				api: options.api,
-				apiKey: options.apiKeyEnv,
-				authHeader: options.api === "anthropic-messages" ? undefined : true,
-				compat:
-					options.api === "openai-completions"
-						? {
-								supportsDeveloperRole: false,
-								supportsReasoningEffort: false,
-							}
-						: undefined,
-				models: [
-					{
-						id: options.modelId,
-						name: options.modelId,
-						reasoning: false,
-						input: ["text"],
-						contextWindow: 200000,
-						maxTokens: 16384,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-						},
-					},
-				],
-			},
+			[options.provider]: createRuntimeModelProvider(options),
 		},
+	};
+}
+
+export function upsertRuntimeModelsConfig(
+	current: RuntimeModelsConfig | undefined,
+	options: RuntimeModelConfigOptions,
+): RuntimeModelsConfig {
+	const existing = current ?? { providers: {} };
+	const providers = { ...existing.providers };
+	const provider = {
+		...(providers[options.provider] ?? createRuntimeModelProvider(options)),
+		baseUrl: trimTrailingSlash(options.baseUrl),
+		api: options.api,
+		apiKey: options.apiKeyEnv,
+		authHeader: options.api === "openai-completions" ? true : undefined,
+	};
+	const existingModels = Array.isArray(provider.models) ? [...provider.models] : [];
+	if (!existingModels.some((entry) => entry.id === options.modelId)) {
+		existingModels.push(createRuntimeModelEntry(options.modelId));
+	}
+	provider.models = existingModels;
+	providers[options.provider] = provider;
+	return {
+		...existing,
+		providers,
 	};
 }
