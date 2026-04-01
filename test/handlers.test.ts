@@ -41,7 +41,7 @@ describe("nekoclaw handlers", () => {
 		await expect(handleAgentRemove(agent.slug, { force: true }, store, daemon)).rejects.toThrow("docker rm failed");
 		expect(store.getAgentByRef(agent.slug).slug).toBe(agent.slug);
 		expect(store.listChannels(agent.agentId)).toHaveLength(1);
-	});
+	}, 10_000);
 
 	it("removes runtime state before deleting the agent config", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");

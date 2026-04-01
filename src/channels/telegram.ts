@@ -21,34 +21,35 @@ import type {
 	ReplyPayload,
 } from "../types.js";
 
-interface TelegramUser {
+export interface TelegramUser {
 	id: number;
 	username?: string;
 	first_name?: string;
 	last_name?: string;
 }
 
-interface TelegramChat {
+export interface TelegramChat {
 	id: number;
 	type: "private" | "group" | "supergroup" | "channel";
 	title?: string;
 }
 
-interface TelegramPhotoSize {
+export interface TelegramPhotoSize {
 	file_id: string;
 	file_size?: number;
 }
 
-interface TelegramDocument {
+export interface TelegramDocument {
 	file_id: string;
 	file_name?: string;
 	mime_type?: string;
 	file_size?: number;
 }
 
-interface TelegramMessage {
+export interface TelegramMessage {
 	message_id: number;
 	date?: number;
+	media_group_id?: string;
 	text?: string;
 	caption?: string;
 	photo?: TelegramPhotoSize[];
@@ -58,6 +59,42 @@ interface TelegramMessage {
 	reply_to_message?: {
 		message_id?: number;
 	};
+}
+
+export interface TelegramBotLike {
+	api: {
+		getMe(): Promise<{ id: number; username?: string }>;
+		setMyCommands(
+			commands: Array<{ command: string; description: string }>,
+			scope: { scope: { type: "all_private_chats" | "all_group_chats" } },
+		): Promise<unknown>;
+		sendMessage(
+			chatId: string,
+			text: string,
+			options: { reply_parameters?: { message_id: number } },
+		): Promise<{ chat: { id: number | string }; message_id: number | string }>;
+		sendPhoto(
+			chatId: string,
+			photo: string | InputFile,
+			options: { caption?: string; reply_parameters?: { message_id: number } },
+		): Promise<{ chat: { id: number | string }; message_id: number | string }>;
+		sendDocument(
+			chatId: string,
+			document: string | InputFile,
+			options: { caption?: string; reply_parameters?: { message_id: number } },
+		): Promise<{ chat: { id: number | string }; message_id: number | string }>;
+		sendChatAction(chatId: string, action: "typing"): Promise<unknown>;
+		editMessageText(chatId: string, messageId: number, text: string): Promise<unknown>;
+		deleteMessage(chatId: string, messageId: number): Promise<unknown>;
+		getFile(fileId: string): Promise<{ file_path?: string }>;
+	};
+	catch(handler: (error: unknown) => void): void;
+	on(
+		filter: string | string[],
+		handler: (ctx: { message?: TelegramMessage; editedMessage?: TelegramMessage }) => Promise<void> | void,
+	): void;
+	start(options: { allowed_updates: string[]; drop_pending_updates: boolean }): Promise<void>;
+	stop(): void;
 }
 
 import {
@@ -178,6 +215,43 @@ export function mapTelegramMessageToEvent(
 	};
 }
 
+export function mapTelegramMediaGroupToEvent(
+	messages: TelegramMessage[],
+	eventType: InboundMessageEvent["eventType"],
+): InboundMessageEvent | undefined {
+	if (messages.length === 0) {
+		return undefined;
+	}
+	const sorted = [...messages].sort((left, right) => left.message_id - right.message_id);
+	const primary = sorted[0];
+	const replyToMessage = sorted.find((message) => message.reply_to_message?.message_id !== undefined)?.reply_to_message;
+	const text = sorted
+		.map((message) => (message.text ?? message.caption ?? "").trim())
+		.filter(Boolean)
+		.join("\n")
+		.trim();
+	const blocks = sorted.flatMap((message) => buildBlocks(message));
+	if (blocks.length === 0) {
+		return undefined;
+	}
+	return {
+		eventType,
+		channelType: "telegram",
+		chatId: String(primary.chat.id),
+		chatKind: primary.chat.type === "private" ? "dm" : "group",
+		chatTitle: primary.chat.title,
+		messageId: String(primary.message_id),
+		replyToMessageId: typeof replyToMessage?.message_id === "number" ? String(replyToMessage.message_id) : undefined,
+		mentionedUsernames: extractMentionedUsernames(text),
+		sender: {
+			externalId: primary.from ? String(primary.from.id) : undefined,
+			displayName: getSenderName(primary.from),
+		},
+		blocks,
+		occurredAt: new Date((primary.date ?? Math.floor(Date.now() / 1_000)) * 1_000).toISOString(),
+	};
+}
+
 export class TelegramChannelPlugin implements ChannelPlugin {
 	readonly type = "telegram" as const;
 	readonly capabilities: ChannelCapabilities = {
@@ -240,19 +314,28 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 
 	botIdentity?: ChannelBotIdentity;
 
-	private readonly bot: Bot;
+	private readonly bot: TelegramBotLike;
 	private running = false;
 	private handlersRegistered = false;
 	private commandsRegistered = false;
 	private botUsername?: string;
+	private readonly mediaGroupBuffers = new Map<
+		string,
+		{
+			eventType: InboundMessageEvent["eventType"];
+			messages: TelegramMessage[];
+			timer?: ReturnType<typeof setTimeout>;
+		}
+	>();
 
 	constructor(
 		private readonly channel: ChannelSpec,
 		private readonly token: string,
 		replyModes?: Partial<Record<ChatKind, ReplyMode>>,
 		private readonly groupTrigger: GroupTriggerMode = DEFAULT_GROUP_TRIGGER,
+		options?: { bot?: TelegramBotLike },
 	) {
-		this.bot = new Bot(token);
+		this.bot = options?.bot ?? (new Bot(token) as unknown as TelegramBotLike);
 		this.replyModes = replyModes ?? {};
 		this.threading = createThreadingAdapter(this.replyModes);
 		this.outbound = createOutboundAdapter(this.capabilities, this.actions, this.threading);
@@ -270,19 +353,59 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 				callbacks.onError?.(new Error(error.message));
 				return;
 			}
-			callbacks.onError?.(error.error instanceof Error ? error.error : new Error(String(error.error)));
+			const wrapped = error as { error?: unknown };
+			callbacks.onError?.(wrapped.error instanceof Error ? wrapped.error : new Error(String(wrapped.error)));
 		});
 		this.bot.on(["message", "edited_message"], async (ctx) => {
 			const message = (ctx.editedMessage ?? ctx.message) as TelegramMessage | undefined;
 			if (!message) {
 				return;
 			}
-			const event = mapTelegramMessageToEvent(message, ctx.editedMessage ? "message.updated" : "message.created");
+			const eventType = ctx.editedMessage ? "message.updated" : "message.created";
+			if (message.media_group_id) {
+				this.queueMediaGroupMessage(message, eventType, callbacks);
+				return;
+			}
+			const event = mapTelegramMessageToEvent(message, eventType);
 			if (!event) {
 				return;
 			}
 			await callbacks.onEvent(event);
 		});
+	}
+
+	private queueMediaGroupMessage(
+		message: TelegramMessage,
+		eventType: InboundMessageEvent["eventType"],
+		callbacks: ChannelPollCallbacks,
+	): void {
+		const key = `${message.chat.id}:${message.media_group_id}`;
+		const pending = this.mediaGroupBuffers.get(key) ?? {
+			eventType,
+			messages: [],
+		};
+		pending.eventType = eventType === "message.updated" ? "message.updated" : pending.eventType;
+		pending.messages.push(message);
+		if (pending.timer) {
+			clearTimeout(pending.timer);
+		}
+		pending.timer = setTimeout(() => {
+			void this.flushMediaGroup(key, callbacks);
+		}, 75);
+		this.mediaGroupBuffers.set(key, pending);
+	}
+
+	private async flushMediaGroup(key: string, callbacks: ChannelPollCallbacks): Promise<void> {
+		const pending = this.mediaGroupBuffers.get(key);
+		if (!pending) {
+			return;
+		}
+		this.mediaGroupBuffers.delete(key);
+		const event = mapTelegramMediaGroupToEvent(pending.messages, pending.eventType);
+		if (!event) {
+			return;
+		}
+		await callbacks.onEvent(event);
 	}
 
 	startPolling(callbacks: ChannelPollCallbacks): void {
@@ -313,6 +436,12 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 		if (!this.running) {
 			return;
 		}
+		for (const pending of this.mediaGroupBuffers.values()) {
+			if (pending.timer) {
+				clearTimeout(pending.timer);
+			}
+		}
+		this.mediaGroupBuffers.clear();
 		this.running = false;
 		this.bot.stop();
 	}
@@ -443,6 +572,7 @@ export function createTelegramChannelPlugin(
 	token: string,
 	replyModes?: Partial<Record<ChatKind, ReplyMode>>,
 	groupTrigger?: GroupTriggerMode,
+	options?: { bot?: TelegramBotLike },
 ): TelegramChannelPlugin {
-	return new TelegramChannelPlugin(channel, token, replyModes, groupTrigger);
+	return new TelegramChannelPlugin(channel, token, replyModes, groupTrigger, options);
 }

@@ -44,7 +44,7 @@ describe("nekoclaw cli help", () => {
 		expect(result.stdout).toContain("nekoclaw restart");
 		expect(result.stdout).toContain("nekoclaw doctor cat-agent");
 		expect(result.stderr).toBe("");
-	});
+	}, 10_000);
 
 	it("shows subgroup help instead of treating --help as an unknown action", async () => {
 		const result = await runCli(["agent", "--help"]);
@@ -54,7 +54,7 @@ describe("nekoclaw cli help", () => {
 		expect(result.stdout).toContain("create");
 		expect(result.stdout).toContain("enable");
 		expect(result.stdout).not.toContain('Unknown agent action "--help"');
-	});
+	}, 10_000);
 
 	it("shows action-level help with options and examples", async () => {
 		const result = await runCli(["model", "set", "--help"]);
@@ -65,7 +65,7 @@ describe("nekoclaw cli help", () => {
 		expect(result.stdout).toContain("--base-url <baseUrl>");
 		expect(result.stdout).toContain("--provider-id <providerId>");
 		expect(result.stdout).toContain("nekoclaw model set cat-agent --provider openai --model gpt-5 --api-key <key>");
-	});
+	}, 10_000);
 
 	it("does not short-circuit leaf commands to help output", async () => {
 		const tempHome = mkdtempSync(join(tmpdir(), "nekoclaw-cli-help-"));

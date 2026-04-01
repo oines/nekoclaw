@@ -23,6 +23,8 @@ type ParsedCommand =
 	| { kind: "model"; scope: "session" | "global"; provider: string; modelId: string }
 	| { kind: "trigger"; mode: "all" | "mention" | "" };
 
+type MutableGroupTriggerPlugin = ChannelPlugin & { groupTrigger?: "all" | "mention" };
+
 export class CommandRouterService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
@@ -99,6 +101,7 @@ export class CommandRouterService {
 					return true;
 				}
 				this.store.setChannelGroupTrigger(agent.agentId, event.channelType, parsed.mode);
+				(plugin as MutableGroupTriggerPlugin).groupTrigger = parsed.mode;
 				await this.reply(plugin, event, {
 					text: `Group trigger for ${event.channelType} updated to ${parsed.mode}.`,
 				});

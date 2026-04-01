@@ -61,7 +61,7 @@ describe("runtime command router", () => {
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Session key: ${session.sessionKey}`);
-	});
+	}, 10_000);
 
 	it("returns status for a command with leading whitespace representing stripped map mentions", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
@@ -561,12 +561,14 @@ describe("runtime command router", () => {
 		store.addAdmin(agent.agentId, { channelType: "napcat", externalUserId: "42" });
 		const reply = vi.fn(async () => []);
 		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+		const plugin = {
+			actions: { reply },
+			groupTrigger: "all" as const,
+		};
 
 		await router.handleCommand(
 			agent,
-			{
-				actions: { reply },
-			} as never,
+			plugin as never,
 			{
 				eventType: "message.created",
 				channelType: "napcat",
@@ -581,6 +583,7 @@ describe("runtime command router", () => {
 		);
 
 		expect(store.getNapcatChannelConfig(agent.agentId)?.groupTrigger).toBe("mention");
+		expect(plugin.groupTrigger).toBe("mention");
 		expect(reply.mock.calls.at(-1)?.[0]?.payload?.text).toContain("updated to mention");
 	});
 

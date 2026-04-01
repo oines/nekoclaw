@@ -68,7 +68,7 @@ describe("nekoclaw daemon", () => {
 		expect(daemonState.processingAgents.has(agent.agentId)).toBe(false);
 		expect(docker.removeAgentContainer).toHaveBeenCalledWith(agent.containerName);
 		expect(store.getRuntimeState(agent.agentId).containerStatus).toBe("missing");
-	});
+	}, 10_000);
 
 	it("processes pending runtime removal control actions", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");

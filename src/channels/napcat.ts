@@ -21,7 +21,7 @@ import type {
 	ReplyPayload,
 } from "../types.js";
 
-type NapcatMessageEvent = MessageEvent.TPrivateMessageEvent | MessageEvent.TGroupMessageEvent;
+export type NapcatMessageEvent = MessageEvent.TPrivateMessageEvent | MessageEvent.TGroupMessageEvent;
 type FileSegmentLike = {
 	type: string;
 	data?: Record<string, unknown>;
@@ -31,6 +31,16 @@ type NapcatMessageEventName =
 	| "message.private.group"
 	| "message.group.normal"
 	| "message.group.notice";
+
+export interface NapcatClientLike {
+	on(event: string, handler: (value: unknown) => void): this;
+	Start(): Promise<unknown>;
+	Disconnect(): void;
+	CallApi(action: string, params: Record<string, unknown>): Promise<unknown>;
+	GetFile(fileId: string): Promise<{ file: string; file_name: string; file_size: number; base64: string }>;
+	DownloadFile(url: string, threadCount: number, headers: string[] | string, base64?: string): Promise<{ file: string }>;
+	connection?: { readyState?: number };
+}
 
 const NAPCAT_MESSAGE_EVENTS: NapcatMessageEventName[] = [
 	"message.private.friend",
@@ -297,7 +307,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 
 	private running = false;
 	private connectPromise: Promise<void> | undefined;
-	private readonly client: Client;
+	private readonly client: NapcatClientLike;
 
 	constructor(
 		private readonly channel: ChannelSpec,
@@ -308,16 +318,18 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		},
 		replyModes?: Partial<Record<ChatKind, ReplyMode>>,
 		private readonly groupTrigger: GroupTriggerMode = DEFAULT_GROUP_TRIGGER,
+		runtime?: { client?: NapcatClientLike },
 	) {
 		this.replyModes = replyModes ?? {};
-		this.client = new Client(Number.parseInt(options.selfId, 10), {
-			websocket_address: options.wsUrl,
-			accent_token: options.accessToken,
-			options: {
-				log_level: ELoggerLevel.error,
-				skip_logo: true,
-			},
-		});
+		this.client = runtime?.client ??
+			(new Client(Number.parseInt(options.selfId, 10), {
+				websocket_address: options.wsUrl,
+				accent_token: options.accessToken,
+				options: {
+					log_level: ELoggerLevel.error,
+					skip_logo: true,
+				},
+			}) as unknown as NapcatClientLike);
 		this.selfId = options.selfId;
 		this.botIdentity = { userId: options.selfId };
 		this.threading = createThreadingAdapter(this.replyModes);
@@ -560,6 +572,7 @@ export function createNapcatChannelPlugin(
 	},
 	replyModes?: Partial<Record<ChatKind, ReplyMode>>,
 	groupTrigger?: GroupTriggerMode,
+	runtime?: { client?: NapcatClientLike },
 ): NapcatChannelPlugin {
-	return new NapcatChannelPlugin(channel, options, replyModes, groupTrigger);
+	return new NapcatChannelPlugin(channel, options, replyModes, groupTrigger, runtime);
 }

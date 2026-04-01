@@ -107,7 +107,7 @@ ${memory.trim() || "(empty)"}`;
 
 
 
-function buildPrompt(payload: WorkerPayload, hasImages: boolean): string {
+function buildPrompt(payload: WorkerPayload, hasImages: boolean, hasFiles: boolean): string {
 	const sender = [payload.job.event.sender.displayName, payload.job.event.sender.externalId].filter(Boolean).join(" / ");
 	const lines = [
 		payload.job.event.eventType ? `Event: ${payload.job.event.eventType}` : undefined,
@@ -118,6 +118,9 @@ function buildPrompt(payload: WorkerPayload, hasImages: boolean): string {
 	];
 	if (hasImages) {
 		lines.push("\n[VISUAL DATA ATTACHED: Use your vision capabilities to analyze the provided image(s) above.]");
+	}
+	if (hasFiles) {
+		lines.push("\n[FILES AVAILABLE IN WORKSPACE: Any File paths listed above are already saved under the workspace. Read those files directly if you need their contents.]");
 	}
 	return lines.filter(Boolean).join("\n");
 }
@@ -231,11 +234,16 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	// Get images from current message or recent history
 	const recentMessages = (session.state.messages || []) as (UserMessage | AssistantMessage)[];
 	const images = collectPromptImages(payload, WORKSPACE_DIR, recentMessages);
+	const hasFiles = payload.job.event.blocks.some((block) => block.kind === "file" && block.attachment?.relativePath);
 
-	let finalUserPrompt = buildPrompt(payload, images.length > 0);
+	let finalUserPrompt = buildPrompt(payload, images.length > 0, hasFiles);
 	if (images.length > 0) {
 		finalUserPrompt +=
 			"\n\n[SYSTEM HINT: I've loaded image pixel data into your vision channel for the images referenced above. Analyze them directly. DO NOT try to 'read()' binary JPG/PNG files using coding tools as they will only show you binary/base64 junk.]";
+	}
+	if (hasFiles) {
+		finalUserPrompt +=
+			"\n\n[SYSTEM HINT: For attached text or document files, use the relative File path shown above and inspect that file from the workspace when needed.]";
 	}
 
 	await session.prompt(finalUserPrompt, images.length > 0 ? { images } : undefined);

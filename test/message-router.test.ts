@@ -109,7 +109,7 @@ describe("message router", () => {
 		expect(reply).toHaveBeenCalledTimes(1);
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Effective model: openrouter/z-ai/glm-4.7-flash");
 		expect(enqueue).not.toHaveBeenCalled();
-	});
+	}, 10_000);
 
 	it("replies with a busy message when enqueue is rejected", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");

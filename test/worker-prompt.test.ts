@@ -137,4 +137,38 @@ describe("worker append prompt", () => {
 		]);
 		rmSync(workspaceDir, { recursive: true, force: true });
 	});
+
+	it("reuses recent image history when the current turn has no image block", () => {
+		const workspaceDir = mkdtempSync(join(tmpdir(), "nekoclaw-worker-history-"));
+		const relativePath = "chats/session-1/attachments/history-image.png";
+		const absolutePath = join(workspaceDir, relativePath);
+		mkdirSync(join(workspaceDir, "chats/session-1/attachments"), { recursive: true });
+		writeFileSync(absolutePath, Buffer.from([4, 5, 6]));
+		const payload: WorkerPayload = {
+			...createPayload("telegram"),
+			job: {
+				...createPayload("telegram").job,
+				event: {
+					...createPayload("telegram").job.event,
+					blocks: [{ kind: "text", text: "what was in that picture?" }],
+				},
+			},
+		};
+
+		const images = collectPromptImages(payload, workspaceDir, [
+			{
+				role: "user",
+				content: `Event: message.created\nContent:\n- Image: ${relativePath}`,
+			} as never,
+		]);
+
+		expect(images).toEqual([
+			{
+				type: "image",
+				data: Buffer.from([4, 5, 6]).toString("base64"),
+				mimeType: "image/jpeg",
+			},
+		]);
+		rmSync(workspaceDir, { recursive: true, force: true });
+	});
 });
