@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChannelSpec, SessionRecord } from "../src/types.js";
+import type { ChannelSpec, InboundMessageEvent, SessionRecord } from "../src/types.js";
 
 const clientMocks = vi.hoisted(() => {
 	const instances: FakeClient[] = [];
@@ -255,26 +255,40 @@ describe("napcat channel plugin", () => {
 		).toBe(false);
 	});
 
-		it("treats quoted group replies as addressed when mention-only triggering is enabled", async () => {
+		it("only treats quoted group replies as addressed when they reply to the bot in mention-only mode", async () => {
 			const plugin = await createTestPlugin({
 				config: { accessToken: undefined },
 				groupTrigger: "mention",
 			});
 
-		expect(
-			plugin.triggering.shouldProcessEvent({
-				eventType: "message.created",
-				channelType: "napcat",
-				chatId: "777",
-				chatKind: "group",
-				messageId: "10",
-				replyToMessageId: "9",
-				sender: { externalId: "555" },
-				blocks: [{ kind: "text", text: "hello" }],
-				occurredAt: "2026-03-29T00:00:00.000Z",
-			}),
-		).toBe(true);
-	});
+			expect(
+				plugin.triggering.shouldProcessEvent({
+					eventType: "message.created",
+					channelType: "napcat",
+					chatId: "777",
+					chatKind: "group",
+					messageId: "10",
+					replyToMessageId: "9",
+					sender: { externalId: "555" },
+					blocks: [{ kind: "text", text: "hello" }],
+					occurredAt: "2026-03-29T00:00:00.000Z",
+				}),
+			).toBe(false);
+			expect(
+				plugin.triggering.shouldProcessEvent({
+					eventType: "message.created",
+					channelType: "napcat",
+					chatId: "777",
+					chatKind: "group",
+					messageId: "10",
+					replyToMessageId: "9",
+					isReplyToBot: true,
+					sender: { externalId: "555" },
+					blocks: [{ kind: "text", text: "hello" }],
+					occurredAt: "2026-03-29T00:00:00.000Z",
+				}),
+			).toBe(true);
+		});
 
 	it("maps reply segments into replyToMessageId", async () => {
 		const { mapNapcatMessageToEvent } = await import("../src/channels/napcat.js");
@@ -309,6 +323,89 @@ describe("napcat channel plugin", () => {
 
 		expect(event?.replyToMessageId).toBe("9");
 		expect(event?.blocks[0]).toEqual({ kind: "text", text: "/status" });
+	});
+
+	it("marks inbound group replies as reply-to-bot only when the reply targets a bot-authored message id", async () => {
+		const plugin = await createTestPlugin({
+			config: { accessToken: undefined },
+			groupTrigger: "mention",
+			sendDelayMs: () => 0,
+		});
+		const client = clientMocks.instances[0];
+		const events: InboundMessageEvent[] = [];
+
+		plugin.startPolling({
+			onEvent: async (event) => {
+				events.push(event);
+			},
+		});
+		await plugin.actions.send({
+			chatId: "777",
+			chatKind: "group",
+			payload: { text: "bot says hi" },
+		});
+
+		client.emit("message.group.normal", {
+			post_type: "message",
+			message_type: "group",
+			sub_type: "normal",
+			time: 1711680000,
+			self_id: 999,
+			user_id: 555,
+			group_id: 777,
+			message_id: 30,
+			raw_message: "[CQ:reply,id=202] hello back",
+			message: [
+				{ type: "reply", data: { id: "202" } },
+				{ type: "text", data: { text: "hello back" } },
+			],
+			sender: {
+				user_id: 555,
+				nickname: "Bob",
+				card: "Builder",
+				sex: "male",
+				age: 20,
+				area: "",
+				level: "",
+				role: "member",
+				title: "",
+			},
+			anonymous: null,
+		});
+		client.emit("message.group.normal", {
+			post_type: "message",
+			message_type: "group",
+			sub_type: "normal",
+			time: 1711680001,
+			self_id: 999,
+			user_id: 555,
+			group_id: 777,
+			message_id: 31,
+			raw_message: "[CQ:reply,id=9999] hello other",
+			message: [
+				{ type: "reply", data: { id: "9999" } },
+				{ type: "text", data: { text: "hello other" } },
+			],
+			sender: {
+				user_id: 555,
+				nickname: "Bob",
+				card: "Builder",
+				sex: "male",
+				age: 20,
+				area: "",
+				level: "",
+				role: "member",
+				title: "",
+			},
+			anonymous: null,
+		});
+
+		await Promise.resolve();
+
+		expect(events[0]?.replyToMessageId).toBe("202");
+		expect(events[0]?.isReplyToBot).toBe(true);
+		expect(events[1]?.replyToMessageId).toBe("9999");
+		expect(events[1]?.isReplyToBot).toBe(false);
 	});
 
 		it("sends private and group replies through the OneBot client", async () => {

@@ -179,6 +179,7 @@ describe("internal chat harness", () => {
 			scenario: [
 				"dm_pair_prompt",
 				"admin_model_session_override",
+				"group_reply_ignored_not_bot",
 				"dm_image_vision",
 				"dm_multi_image_vision",
 				"dm_natural_image_description",
@@ -192,7 +193,7 @@ describe("internal chat harness", () => {
 		});
 
 		expect(report.ok).toBe(true);
-		expect(report.results).toHaveLength(20);
+		expect(report.results).toHaveLength(22);
 		expect(report.results.every((result) => result.status === "passed")).toBe(true);
 		expect(report.results.some((result) => result.channel === "telegram")).toBe(true);
 		expect(report.results.some((result) => result.channel === "napcat")).toBe(true);

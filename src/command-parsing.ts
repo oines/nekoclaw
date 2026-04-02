@@ -14,7 +14,7 @@ export function isExplicitlyAddressedEvent(event: InboundMessageEvent): boolean 
 	return (
 		(event.mentionedUsernames?.length ?? 0) > 0 ||
 		(event.mentionedUserIds?.length ?? 0) > 0 ||
-		Boolean(event.replyToMessageId)
+		Boolean(event.isReplyToBot)
 	);
 }
 

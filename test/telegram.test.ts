@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelegramChannelPlugin, mapTelegramMessageToEvent } from "../src/channels/telegram.js";
-import type { ChannelSpec, SessionRecord } from "../src/types.js";
+import type { ChannelSpec, InboundMessageEvent, SessionRecord } from "../src/types.js";
 
 const channel: ChannelSpec = {
 	agentId: "agent-1",
@@ -435,7 +435,7 @@ describe("telegram channel plugin outbound, reply mode, and hydration", () => {
 		expect(plugin.triggering.shouldProcessEvent(addressed!)).toBe(true);
 	});
 
-	it("treats quoted group replies as addressed in mention mode", () => {
+	it("only treats quoted group replies as addressed in mention mode when they reply to the bot", () => {
 		const plugin = createTelegramChannelPlugin(channel, "token", undefined, "mention");
 		(plugin as unknown as { botUsername?: string }).botUsername = "mock_bot";
 
@@ -451,7 +451,85 @@ describe("telegram channel plugin outbound, reply mode, and hydration", () => {
 				blocks: [{ kind: "text", text: "hello" }],
 				occurredAt: "2026-03-29T00:00:00.000Z",
 			}),
+		).toBe(false);
+		expect(
+			plugin.triggering.shouldProcessEvent({
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "-1001",
+				chatKind: "group",
+				messageId: "95",
+				replyToMessageId: "94",
+				isReplyToBot: true,
+				sender: { externalId: "42" },
+				blocks: [{ kind: "text", text: "hello" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			}),
 		).toBe(true);
+	});
+
+	it("marks inbound group replies as reply-to-bot only when the reply targets a bot-authored message id", async () => {
+		const onHandler = vi.fn();
+		const api = {
+			getMe: vi.fn().mockResolvedValue({ id: 999, username: "mock_bot" }),
+			setMyCommands: vi.fn().mockResolvedValue(true),
+			sendMessage: vi.fn().mockResolvedValue({ chat: { id: -1001 }, message_id: 501 }),
+			sendPhoto: vi.fn(),
+			sendDocument: vi.fn(),
+			sendChatAction: vi.fn(),
+			editMessageText: vi.fn(),
+			deleteMessage: vi.fn(),
+			getFile: vi.fn(),
+		};
+		const plugin = createTelegramChannelPlugin(channel, "token", undefined, "mention", {
+			bot: {
+				api,
+				catch: vi.fn(),
+				on: onHandler,
+				start: vi.fn().mockResolvedValue(undefined),
+				stop: vi.fn(),
+			} as never,
+		});
+		const events: InboundMessageEvent[] = [];
+
+		plugin.startPolling({
+			onEvent: async (event) => {
+				events.push(event);
+			},
+			onError: vi.fn(),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await plugin.actions.send({
+			chatId: "-1001",
+			chatKind: "group",
+			payload: { text: "bot says hi" },
+		});
+
+		const messageHandler = onHandler.mock.calls.find((call) => Array.isArray(call[0]) || call[0] === "message")?.[1];
+		expect(typeof messageHandler).toBe("function");
+		await messageHandler({
+			message: {
+				message_id: 600,
+				text: "reply to bot",
+				chat: { id: -1001, type: "supergroup", title: "Ops" },
+				from: { id: 42, username: "alice" },
+				reply_to_message: { message_id: 501 },
+			},
+		});
+		await messageHandler({
+			message: {
+				message_id: 601,
+				text: "reply to someone else",
+				chat: { id: -1001, type: "supergroup", title: "Ops" },
+				from: { id: 42, username: "alice" },
+				reply_to_message: { message_id: 9999 },
+			},
+		});
+
+		expect(events[0]?.replyToMessageId).toBe("501");
+		expect(events[0]?.isReplyToBot).toBe(true);
+		expect(events[1]?.replyToMessageId).toBe("9999");
+		expect(events[1]?.isReplyToBot).toBe(false);
 	});
 
 	it("registers bot commands for private chats and groups when polling starts", async () => {

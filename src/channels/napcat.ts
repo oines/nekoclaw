@@ -76,6 +76,7 @@ import {
 	createPairingAdapter,
 	createThreadingAdapter,
 } from "./base-channel.js";
+import { RecentBotMessageIds } from "./recent-bot-message-ids.js";
 
 
 function normalizeSegments(message: TElements): Segment.TSegment[] {
@@ -308,7 +309,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 			if (this.groupTrigger === "all") {
 				return true;
 			}
-			if (event.replyToMessageId) {
+			if (event.isReplyToBot) {
 				return true;
 			}
 			if (!isExplicitlyAddressedEvent(event)) {
@@ -330,6 +331,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 	private sendGeneration = 0;
 	private callbacks: ChannelPollCallbacks | undefined;
 	private readonly client: NapcatClientLike;
+	private readonly recentBotMessageIds = new RecentBotMessageIds();
 
 		constructor(
 			private readonly channel: ChannelSpec,
@@ -448,6 +450,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 			this.client.on(eventName, async (message) => {
 				const event = mapNapcatMessageToEvent(message as NapcatMessageEvent, this.selfId);
 				if (event) {
+					event.isReplyToBot = this.recentBotMessageIds.isReplyToBot(event.chatId, event.replyToMessageId);
 					await this.callbacks?.onEvent(event);
 				}
 			});
@@ -654,6 +657,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 				});
 				first = false;
 			}
+			this.recentBotMessageIds.note(chatId, refs);
 			return refs;
 		}
 		if (!payload.text?.trim()) {
@@ -661,12 +665,14 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		}
 		await this.waitBeforeSend();
 		const messageId = await this.sendMessage(chatId, chatKind, toTextElements(payload.text, replyToId));
-		return [
+		const refs = [
 			{
 				chatId,
 				messageId: String(messageId),
 			},
 		];
+		this.recentBotMessageIds.note(chatId, refs);
+		return refs;
 	}
 
 	private async sendMessage(chatId: string, chatKind: ChatKind, message: TElements): Promise<unknown> {

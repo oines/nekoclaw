@@ -246,6 +246,7 @@ export interface InboundMessageEvent {
 	chatTitle?: string;
 	messageId: string;
 	replyToMessageId?: string;
+	isReplyToBot?: boolean;
 	mentionedUserIds?: string[];
 	mentionedUsernames?: string[];
 	sender: MessageSender;

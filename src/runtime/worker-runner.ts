@@ -152,7 +152,7 @@ export class WorkerRunnerService {
 			: false;
 		const identity: NonNullable<WorkerPayload["selfIdentity"]> = {
 			isExplicitlyAddressed:
-				Boolean(job.event.replyToMessageId) || isBotMentionedByUsername || isBotMentionedById,
+				Boolean(job.event.isReplyToBot) || isBotMentionedByUsername || isBotMentionedById,
 		};
 		if (botUsername) {
 			identity.telegramHandles = [`@${botUsername}`];

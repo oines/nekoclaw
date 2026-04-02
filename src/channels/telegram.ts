@@ -102,6 +102,7 @@ import {
 	createPairingAdapter,
 	createThreadingAdapter,
 } from "./base-channel.js";
+import { RecentBotMessageIds } from "./recent-bot-message-ids.js";
 const DEFAULT_GROUP_TRIGGER: GroupTriggerMode = "all";
 
 const TELEGRAM_DM_COMMANDS = [
@@ -291,7 +292,7 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 			if (this.groupTrigger === "all") {
 				return true;
 			}
-			if (event.replyToMessageId) {
+			if (event.isReplyToBot) {
 				return true;
 			}
 			if (!this.botUsername) {
@@ -319,6 +320,7 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 	private handlersRegistered = false;
 	private commandsRegistered = false;
 	private botUsername?: string;
+	private readonly recentBotMessageIds = new RecentBotMessageIds();
 	private readonly mediaGroupBuffers = new Map<
 		string,
 		{
@@ -370,6 +372,7 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 			if (!event) {
 				return;
 			}
+			event.isReplyToBot = this.recentBotMessageIds.isReplyToBot(event.chatId, event.replyToMessageId);
 			await callbacks.onEvent(event);
 		});
 	}
@@ -405,6 +408,7 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 		if (!event) {
 			return;
 		}
+		event.isReplyToBot = this.recentBotMessageIds.isReplyToBot(event.chatId, event.replyToMessageId);
 		await callbacks.onEvent(event);
 	}
 
@@ -517,6 +521,7 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 				refs.push(ref);
 				first = false;
 			}
+			this.recentBotMessageIds.note(chatId, refs);
 			return refs;
 		}
 
@@ -531,6 +536,7 @@ export class TelegramChannelPlugin implements ChannelPlugin {
 			chatId: String(message.chat.id),
 			messageId: String(message.message_id),
 		});
+		this.recentBotMessageIds.note(chatId, refs);
 		return refs;
 	}
 

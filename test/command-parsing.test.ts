@@ -40,6 +40,7 @@ describe("command parsing", () => {
 			parseAddressedSlashCommand(
 				createGroupEvent("/status", {
 					replyToMessageId: "9",
+					isReplyToBot: true,
 				}),
 			),
 		).toMatchObject({

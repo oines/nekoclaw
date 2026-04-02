@@ -587,6 +587,36 @@ async function scenarioGroupReplyChat(context: ScenarioContext): Promise<void> {
 	assertCondition(outbound?.text?.trim(), "Expected outbound after reply-addressed group message");
 }
 
+async function scenarioGroupReplyIgnoredWhenNotBot(context: ScenarioContext): Promise<void> {
+	presetGroupTrigger(context, "mention");
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "Group User",
+		text: "/pair",
+		mentionBot: true,
+	});
+	await acceptPendingPair(context, context.groupChatId);
+	const otherUserMessage = await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "group-other-user",
+		senderName: "Other Group User",
+		text: "plain user message",
+	});
+	const before = countOutbound(context.driver, context.groupChatId);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "Group User",
+		text: "replying to another user only",
+		replyToMessageId: otherUserMessage.messageId,
+	});
+	await expectNoOutboundDelta(context, context.groupChatId, before);
+}
+
 async function scenarioGroupPairCommand(context: ScenarioContext): Promise<void> {
 	presetGroupTrigger(context, "all");
 	await sendAndWait(context, {
@@ -1888,6 +1918,7 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "group_mention_ignored", channel: "telegram", run: scenarioGroupMentionIgnored },
 	{ name: "group_mention_chat", channel: "telegram", run: scenarioGroupMentionChat },
 	{ name: "group_reply_chat", channel: "telegram", run: scenarioGroupReplyChat },
+	{ name: "group_reply_ignored_not_bot", channel: "telegram", run: scenarioGroupReplyIgnoredWhenNotBot },
 	{ name: "group_pair_command", channel: "telegram", run: scenarioGroupPairCommand },
 	{ name: "tool_proactive_send_message", channel: "telegram", run: scenarioToolProactiveSendMessage },
 	{ name: "admin_status", channel: "telegram", run: scenarioAdminStatus },
@@ -1920,6 +1951,7 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "group_mention_ignored", channel: "napcat", run: scenarioGroupMentionIgnored },
 	{ name: "group_mention_chat", channel: "napcat", run: scenarioGroupMentionChat },
 	{ name: "group_reply_chat", channel: "napcat", run: scenarioGroupReplyChat },
+	{ name: "group_reply_ignored_not_bot", channel: "napcat", run: scenarioGroupReplyIgnoredWhenNotBot },
 	{ name: "group_pair_command", channel: "napcat", run: scenarioGroupPairCommand },
 	{ name: "tool_proactive_send_message", channel: "napcat", run: scenarioToolProactiveSendMessage },
 	{ name: "admin_status", channel: "napcat", run: scenarioAdminStatus },
