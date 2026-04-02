@@ -181,9 +181,14 @@ function createListContactsTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "list_contacts",
 		label: "List Contacts",
-		description: "List known contacts from the runtime-known directory snapshot.",
+		description: "Look through the contacts you already know, like checking your own address book before reaching out to someone.",
 		promptSnippet:
-			"list_contacts(channel?): inspect known contacts already seen by the runtime before choosing a proactive messaging target.",
+			"list_contacts(channel?): check who you already know on telegram or qq before choosing someone to contact.",
+		promptGuidelines: [
+			"Use this when you want to proactively contact someone but need to see which known contacts are currently available to you.",
+			"Treat the result like your own address book: it shows people the runtime already knows about, not the platform's full friend list.",
+			"Use get_contact_detail(account) after this if you want a closer look at one person before messaging them.",
+		],
 		parameters: ListContactsParameters,
 		execute: async (_toolCallId, params) => {
 			const input = params as ListContactsInput;
@@ -200,9 +205,14 @@ function createListGroupsTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "list_groups",
 		label: "List Groups",
-		description: "List known groups from the runtime-known directory snapshot.",
+		description: "Look through the groups you already know about, like checking which rooms or group chats you have been in.",
 		promptSnippet:
-			"list_groups(channel?): inspect known groups already seen by the runtime before choosing a group target or member lookup.",
+			"list_groups(channel?): check which known telegram or qq groups are currently available to you before messaging a group or inspecting its members.",
+		promptGuidelines: [
+			"Use this when you want to proactively talk in another group and need its explicit group ref first.",
+			"Treat the result like a list of group chats the runtime already knows, not a platform-wide directory of every group.",
+			"Use get_group_members(groupRef) after this if you need to see which known people are associated with one specific group.",
+		],
 		parameters: ListGroupsParameters,
 		execute: async (_toolCallId, params) => {
 			const input = params as ListGroupsInput;
@@ -219,9 +229,14 @@ function createGetGroupMembersTool(context: ChannelToolContext): ToolDefinition 
 	return {
 		name: "get_group_members",
 		label: "Group Members",
-		description: "Show known members for one known group ref from the runtime snapshot.",
+		description: "Inspect which people you currently know in one specific group, like checking who is in the room before speaking there.",
 		promptSnippet:
-			"get_group_members(groupRef): inspect runtime-known members for a specific known group ref.",
+			"get_group_members(groupRef): inspect the known members of one explicit group ref.",
+		promptGuidelines: [
+			"Use this after list_groups when you want to understand who you know in a particular group.",
+			"Treat the result as your runtime-known view of that group, not a guaranteed full member roster from the platform.",
+			"Use the returned member refs if you later want to inspect someone with get_contact_detail(account).",
+		],
 		parameters: GetGroupMembersParameters,
 		execute: async (_toolCallId, params) => {
 			const input = params as GetGroupMembersInput;
@@ -246,9 +261,14 @@ function createGetContactDetailTool(context: ChannelToolContext): ToolDefinition
 	return {
 		name: "get_contact_detail",
 		label: "Contact Detail",
-		description: "Show runtime-known metadata for one known contact ref.",
+		description: "Inspect one known person's contact card and recent runtime metadata before you decide how to address them.",
 		promptSnippet:
-			"get_contact_detail(account): inspect one runtime-known contact before deciding whether to send a proactive message.",
+			"get_contact_detail(account): inspect one explicit contact ref to understand who that person is in your current runtime-known world.",
+		promptGuidelines: [
+			"Use this when you already have a contact ref and want a closer look before messaging or referring to that person.",
+			"Treat the result like a contact card built from runtime knowledge, not a guaranteed complete identity record.",
+			"Use list_contacts first if you do not yet know which contact ref to inspect.",
+		],
 		parameters: GetContactDetailParameters,
 		execute: async (_toolCallId, params) => {
 			const input = params as GetContactDetailInput;
@@ -272,13 +292,14 @@ function createSendMessageTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "send_message",
 		label: "Send Message",
-		description: "Send a proactive message to another known contact or group using an explicit target ref.",
+		description: "Proactively start speaking in another known chat, like opening a different conversation window and sending a message there.",
 		promptSnippet:
-			"send_message(target, text?, attachments?): proactively message another runtime-known contact or group. Use this instead of message(...) for cross-target outreach.",
+			"send_message(target, text?, attachments?): proactively message another known contact or group outside the current session.",
 		promptGuidelines: [
-				"Use send_message only with explicit target refs like telegram:dm:123 or qq:group:456.",
+			"Use this only when you want to contact a different person or group than the one you are currently talking to.",
+			"Use explicit target refs like telegram:dm:123 or qq:group:456.",
 			"Use list_contacts or list_groups first if you are not sure which target ref to use.",
-			"send_message is for proactive outreach to a different contact or group. For the current session, either respond in plain text or use message(...) for advanced current-session actions.",
+			"For the current session, either respond in plain text or use message(...) for advanced current-session actions instead.",
 		],
 		parameters: SendMessageParameters,
 		execute: async (_toolCallId, params) => {
@@ -318,9 +339,14 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "session_status",
 		label: "Session Status",
-		description: "Describe the current session and which messaging actions it supports.",
+		description: "Orient yourself in the current conversation: where you are, what kind of chat this is, and what messaging actions are available here.",
 		promptSnippet:
-			"session_status(): inspect the current session, channel capabilities, and reply behavior before using message actions.",
+			"session_status(): check your current conversation context and available messaging abilities before choosing how to act.",
+		promptGuidelines: [
+			"Use this when you need to ground yourself in the current chat before taking an action.",
+			"It helps you confirm whether you are in a DM or group, which channel you are on, and what message actions are supported here.",
+			"It also shows current compaction and pruning settings so you know the shape of the session context you are working inside.",
+		],
 		parameters: SessionStatusParameters,
 			execute: async () => {
 				const summary = {
