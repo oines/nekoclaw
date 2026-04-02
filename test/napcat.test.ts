@@ -169,6 +169,7 @@ describe("napcat channel plugin", () => {
 			self_id: 999,
 			user_id: 555,
 			group_id: 777,
+			group_name: "TIAL Members",
 			message_id: 2,
 			raw_message: "/pair",
 			message: [{ type: "text", data: { text: "/pair" } }],
@@ -200,6 +201,7 @@ describe("napcat channel plugin", () => {
 			channelType: "napcat",
 			chatKind: "group",
 			chatId: "777",
+			chatTitle: "TIAL Members",
 			messageId: "2",
 			sender: {
 				externalId: "555",

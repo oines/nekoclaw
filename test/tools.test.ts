@@ -58,6 +58,11 @@ const runtimeDirectory: RuntimeDirectorySnapshot = {
 			channel: "telegram",
 			lastSeenAt: "2026-03-29T00:10:00.000Z",
 		},
+		{
+			groupRef: "qq:group:244962071",
+			channel: "qq",
+			lastSeenAt: "2026-03-29T00:15:00.000Z",
+		},
 	],
 	groupMembers: {
 		"telegram:group:-1001": [
@@ -173,6 +178,8 @@ describe("tool composition", () => {
 		expect(groupsResult?.details).toEqual({
 			groups: runtimeDirectory.groups,
 		});
+		expect(groupsResult?.content[0]?.type).toBe("text");
+		expect((groupsResult?.content[0] as { text?: string } | undefined)?.text).toContain('"title": null');
 	});
 
 	it("returns group members and contact details from the snapshot", async () => {
@@ -199,6 +206,8 @@ describe("tool composition", () => {
 			group: runtimeDirectory.groups[0],
 			members: runtimeDirectory.groupMembers["telegram:group:-1001"],
 		});
+		expect(membersResult?.content[0]?.type).toBe("text");
+		expect((membersResult?.content[0] as { text?: string } | undefined)?.text).toContain('"title": "Tech Group"');
 		expect(contactResult?.details).toEqual(runtimeDirectory.contacts[0]);
 	});
 

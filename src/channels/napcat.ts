@@ -161,6 +161,30 @@ function getSenderName(message: NapcatMessageEvent): string | undefined {
 	return message.sender.nickname || String(message.user_id);
 }
 
+function extractNapcatChatTitle(message: NapcatMessageEvent): string | undefined {
+	if (message.message_type !== "group") {
+		return undefined;
+	}
+	const envelope = message as NapcatMessageEvent & {
+		group_name?: unknown;
+		groupName?: unknown;
+		group?: { name?: unknown; group_name?: unknown; title?: unknown };
+	};
+	const candidates = [
+		envelope.group_name,
+		envelope.groupName,
+		envelope.group?.name,
+		envelope.group?.group_name,
+		envelope.group?.title,
+	];
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate.trim()) {
+			return candidate.trim();
+		}
+	}
+	return undefined;
+}
+
 export function mapNapcatMessageToEvent(
 	message: NapcatMessageEvent,
 	selfId?: string,
@@ -186,6 +210,7 @@ export function mapNapcatMessageToEvent(
 		channelType: "napcat",
 		chatId,
 		chatKind,
+		chatTitle: extractNapcatChatTitle(message),
 		messageId: String(message.message_id),
 		replyToMessageId,
 		mentionedUserIds,

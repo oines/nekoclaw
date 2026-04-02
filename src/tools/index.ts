@@ -82,6 +82,13 @@ function failUnknownTarget(target: string): never {
 	);
 }
 
+function serializeGroupForModel<T extends { title?: string }>(group: T): Omit<T, "title"> & { title: string | null } {
+	return {
+		...group,
+		title: group.title ?? null,
+	};
+}
+
 function createMessageTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "message",
@@ -211,6 +218,7 @@ function createListGroupsTool(context: ChannelToolContext): ToolDefinition {
 		promptGuidelines: [
 			"Use this when you want to proactively talk in another group and need its explicit group ref first.",
 			"Treat the result like a list of group chats the runtime already knows, not a platform-wide directory of every group.",
+			"If a group's title is null, treat the group name as unknown. Do not guess or rename it.",
 			"Use get_group_members(groupRef) after this if you need to see which known people are associated with one specific group.",
 		],
 		parameters: ListGroupsParameters,
@@ -218,7 +226,7 @@ function createListGroupsTool(context: ChannelToolContext): ToolDefinition {
 			const input = params as ListGroupsInput;
 			const groups = context.runtimeDirectory.groups.filter((group) => !input.channel || group.channel === input.channel);
 			return {
-				content: [{ type: "text", text: JSON.stringify(groups, null, 2) }],
+				content: [{ type: "text", text: JSON.stringify(groups.map(serializeGroupForModel), null, 2) }],
 				details: { groups },
 			};
 		},
@@ -235,6 +243,7 @@ function createGetGroupMembersTool(context: ChannelToolContext): ToolDefinition 
 		promptGuidelines: [
 			"Use this after list_groups when you want to understand who you know in a particular group.",
 			"Treat the result as your runtime-known view of that group, not a guaranteed full member roster from the platform.",
+			"If the group's title is null, treat its name as unknown instead of inventing one.",
 			"Use the returned member refs if you later want to inspect someone with get_contact_detail(account).",
 		],
 		parameters: GetGroupMembersParameters,
@@ -250,7 +259,7 @@ function createGetGroupMembersTool(context: ChannelToolContext): ToolDefinition 
 			}
 			const members = context.runtimeDirectory.groupMembers[input.groupRef] ?? [];
 			return {
-				content: [{ type: "text", text: JSON.stringify({ group, members }, null, 2) }],
+				content: [{ type: "text", text: JSON.stringify({ group: serializeGroupForModel(group), members }, null, 2) }],
 				details: { group, members },
 			};
 		},

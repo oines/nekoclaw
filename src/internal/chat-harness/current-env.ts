@@ -2199,6 +2199,7 @@ class NapcatHarnessDriver implements HarnessDriver {
 				self_id: Number(this.selfId),
 				user_id: Number(input.senderId),
 				group_id: input.chatKind === "group" ? Number(chatId) : undefined,
+				group_name: input.chatKind === "group" ? input.chatTitle ?? GROUP_TITLE : undefined,
 				message_id: Number(messageId),
 				raw_message: input.chatKind === "group" && input.mentionBot ? `@bot ${input.text}` : input.text,
 				message: segments,

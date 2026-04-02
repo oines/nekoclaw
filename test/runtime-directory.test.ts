@@ -148,4 +148,45 @@ describe("runtime directory service", () => {
 			]),
 		);
 	});
+
+	it("preserves QQ group titles from current events in the runtime snapshot", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { RuntimeDirectoryService } = await import("../src/runtime/runtime-directory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "directory-qq" });
+		store.createChannel(agent.agentId, "napcat");
+		const groupSession = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "244962071",
+			chatKind: "group",
+		});
+
+		const service = new RuntimeDirectoryService(store);
+		const snapshot = service.buildSnapshot(
+			agent,
+			groupSession,
+			createEvent({
+				channelType: "napcat",
+				chatId: "244962071",
+				chatKind: "group",
+				messageId: "m1",
+				senderId: "3184675714",
+				senderName: "oines",
+				text: "hello group",
+				occurredAt: "2026-04-02T08:20:00.000Z",
+				chatTitle: "TIAL Members",
+			}),
+		);
+
+		expect(snapshot.groups).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					groupRef: "qq:group:244962071",
+					title: "TIAL Members",
+					pairedSessionKey: groupSession.sessionKey,
+				}),
+			]),
+		);
+	});
 });
