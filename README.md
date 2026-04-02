@@ -122,7 +122,7 @@ When a new user messsages a group where the agent is present, they may need to "
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/nekoclaw.git
+git clone https://github.com/oines/nekoclaw.git
 cd nekoclaw
 
 # Install dependencies
