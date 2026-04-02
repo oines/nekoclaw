@@ -437,5 +437,5 @@ export function createToolComposition(context: ChannelToolContext, channelTools:
 }
 
 function shouldExposeNoReplyTool(context: ChannelToolContext): boolean {
-	return context.event.chatKind !== "dm" && !context.isExplicitlyAddressed;
+	return context.event.chatKind !== "dm";
 }

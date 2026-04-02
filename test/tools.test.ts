@@ -310,7 +310,7 @@ describe("tool composition", () => {
 		]);
 	});
 
-	it("does not expose no_reply for explicitly mentioned group messages", () => {
+	it("still exposes no_reply for explicitly mentioned group messages", () => {
 		const composition = createContext({ chatKind: "group", isExplicitlyAddressed: true });
 
 		expect(composition.nekoclawTools.map((tool) => tool.name)).toEqual([
@@ -321,6 +321,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"no_reply",
 		]);
 		expect(composition.customTools.map((tool) => tool.name)).toEqual([
 			"message",
@@ -330,6 +331,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"no_reply",
 		]);
 	});
 });
