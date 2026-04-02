@@ -344,6 +344,7 @@ export class JsonNekoclawStore {
 			channelType: ChannelType;
 			externalConversationId: string;
 			chatKind: ChatKind;
+			chatTitle?: string;
 			threadId?: string;
 			parentSessionKey?: string;
 			sessionKey?: string;
@@ -365,6 +366,16 @@ export class JsonNekoclawStore {
 		input: { externalConversationId: string; threadId?: string },
 	): SessionRecord {
 		return this.sessions.updateSessionLastRoute(agentRef, sessionRef, input);
+	}
+
+	updateSessionChatTitle(agentRef: string, sessionRef: string, chatTitle: string): SessionRecord {
+		const session = this.sessions.updateSessionChatTitle(agentRef, sessionRef, chatTitle);
+		this.audit(session.agentId, "session.chat_title_updated", {
+			sessionRecordId: session.sessionRecordId,
+			sessionKey: session.sessionKey,
+			chatTitle: session.chatTitle,
+		});
+		return session;
 	}
 
 	setSessionModelOverride(
@@ -469,6 +480,7 @@ export class JsonNekoclawStore {
 			channelType: pair.channelType,
 			externalConversationId: pair.externalConversationId,
 			chatKind: pair.chatKind,
+			chatTitle: pair.chatTitle,
 			threadId: pair.threadId,
 			parentSessionKey: pair.parentSessionKey,
 			sessionKey: pair.sessionKey,

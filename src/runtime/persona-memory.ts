@@ -1,8 +1,21 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
 import { complete, type Context } from "@mariozechner/pi-ai";
-import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
+import {
+	AuthStorage,
+	createAgentSession,
+	createEditToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+	DefaultResourceLoader,
+	ModelRegistry,
+	SessionManager,
+	SettingsManager,
+	type ToolDefinition,
+} from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { MODEL_ENV_MAP } from "../model/provider-key.js";
 import { summarizeBlocks } from "../messages.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
@@ -22,8 +35,7 @@ const FORMATION_MAX_RETRIES = 3;
 const DREAM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const DREAM_DOC_EXCERPT_TOKEN_BUDGET = 220;
 const DREAM_OBSERVATION_EXCERPT_TOKEN_BUDGET = 180;
-const DREAM_MAX_TARGETS = 4;
-const DREAM_MAX_SOURCE_PATHS = 6;
+const MAINTENANCE_TIMEOUT_MS = 120_000;
 
 const maintenanceLocks = new Map<string, Promise<void>>();
 const backlogSweepQueued = new Set<string>();
@@ -38,18 +50,6 @@ interface SelectorResult {
 interface SelectorAttemptResult {
 	result?: SelectorResult;
 	fallbackReason?: string;
-}
-
-interface FormationWrite {
-	path: string;
-	content: string;
-}
-
-interface FormationResult {
-	indexMarkdown: string;
-	writes: FormationWrite[];
-	deletes: string[];
-	consumeObservationLines: number;
 }
 
 interface FormationRetryState {
@@ -91,21 +91,25 @@ interface DreamCorpusSnapshot {
 	corpusSignature: string;
 }
 
-interface DreamPlannerTarget {
-	path: string;
-	sources: string[];
-	reason: string;
+interface MaintenanceFinalizeDetails {
+	consumeObservationLines?: number;
+	summary?: string;
 }
 
-interface DreamPlannerResult {
-	targets: DreamPlannerTarget[];
-	notes: string;
+interface MaintenanceExecutionResult {
+	finalize: MaintenanceFinalizeDetails;
+	touchedPaths: string[];
+	deletedPaths: string[];
 }
 
-interface DreamResult {
-	indexMarkdown: string;
-	writes: FormationWrite[];
-}
+const PersonaFinalizeSchema = Type.Object({
+	consumeObservationLines: Type.Optional(Type.Number({ description: "How many lines from the current observation backlog were fully incorporated." })),
+	summary: Type.Optional(Type.String({ description: "Short summary of what was changed in this maintenance run." })),
+});
+
+const DeleteMemoryFileSchema = Type.Object({
+	path: Type.String({ description: "Relative path under memory/people or memory/scenes to delete." }),
+});
 
 function estimateTokens(value: string): number {
 	return Math.ceil(value.length / 4);
@@ -198,6 +202,49 @@ function isAllowedMemoryPath(value: string): boolean {
 		(value.startsWith("memory/people/") || value.startsWith("memory/scenes/")) &&
 		value.endsWith(".md")
 	);
+}
+
+function isIndexPath(value: string): boolean {
+	return value === "index.md";
+}
+
+function isObservationPath(value: string): boolean {
+	return !value.includes("..") && value.startsWith("observations/") && value.endsWith(".log");
+}
+
+function normalizeRelativeMaintenancePath(baseDir: string, inputPath: string): string {
+	const absolutePath = resolve(baseDir, inputPath);
+	const relativePath = relative(baseDir, absolutePath).replace(/\\/g, "/");
+	if (relativePath === "" || relativePath.startsWith("../") || relativePath === "..") {
+		throw new Error(`Path "${inputPath}" is outside the persona workspace.`);
+	}
+	return relativePath;
+}
+
+function assertReadableMaintenancePath(relativePath: string): void {
+	if (isIndexPath(relativePath) || isAllowedMemoryPath(relativePath) || isObservationPath(relativePath)) {
+		return;
+	}
+	throw new Error(`Read is only allowed for index.md, memory/**, and observations/**. Received "${relativePath}".`);
+}
+
+function assertEditableMaintenancePath(relativePath: string): void {
+	if (isIndexPath(relativePath) || isAllowedMemoryPath(relativePath)) {
+		return;
+	}
+	throw new Error(`Edit is only allowed for index.md and memory/people|scenes markdown files. Received "${relativePath}".`);
+}
+
+function assertWritableMaintenancePath(relativePath: string): void {
+	if (!isAllowedMemoryPath(relativePath) || isIndexPath(relativePath)) {
+		throw new Error(`Write is only allowed for new memory/people or memory/scenes markdown files. Received "${relativePath}".`);
+	}
+}
+
+function assertDeletableMaintenancePath(relativePath: string): void {
+	if (!isAllowedMemoryPath(relativePath)) {
+		throw new Error(`Delete is only allowed for memory/people or memory/scenes markdown files. Received "${relativePath}".`);
+	}
 }
 
 function listMarkdownFiles(dir: string, baseDir: string): string[] {
@@ -297,52 +344,6 @@ function fallbackSelector(
 	};
 }
 
-function fallbackFormation(input: {
-	sceneRef: string;
-	observationLines: string[];
-	replyText: string;
-	event?: InboundMessageEvent;
-	indexMarkdown: string;
-}): FormationResult {
-	const writes: FormationWrite[] = [];
-	const notes: string[] = [];
-	if (input.event) {
-		const peoplePath = buildAccountMemoryPath(input.event);
-		const speakerName = input.event.sender.displayName || `${input.event.channelType}:${input.event.sender.externalId ?? input.event.chatId}`;
-		const memoryBody = [
-			`${speakerName}`,
-			"",
-			`最近一次相关互动里，对方说：${collectEventText(input.event)}`,
-			input.replyText ? `我当时回复了：${input.replyText}` : undefined,
-		]
-			.filter(Boolean)
-			.join("\n");
-		writes.push({ path: peoplePath, content: `${memoryBody}\n` });
-		notes.push(`- ${speakerName}：最近一次相关互动已记录 → ${peoplePath}`);
-	}
-	if (input.observationLines.length > 0) {
-		const scenePath = buildSceneMemoryPath(input.sceneRef);
-		const sceneBody = [
-			`这个场景近期的旁观或互动记录：`,
-			"",
-			...input.observationLines.slice(-12),
-		].join("\n");
-		writes.push({ path: scenePath, content: `${sceneBody}\n` });
-		notes.push(`- ${input.sceneRef}：近期场景记录 → ${scenePath}`);
-	}
-	const indexMarkdown = notes.length > 0 ? `## 我认识的人和场景\n${notes.join("\n")}\n` : input.indexMarkdown;
-	return {
-		indexMarkdown,
-		writes,
-		deletes: [],
-		consumeObservationLines: input.observationLines.length,
-	};
-}
-
-function isAllowedDreamSourcePath(value: string): boolean {
-	return !value.includes("..") && (value.startsWith("memory/") || value.startsWith("observations/"));
-}
-
 function buildDreamSkipKey(reason: string, details: Record<string, unknown>): string {
 	return JSON.stringify({ reason, ...details });
 }
@@ -358,6 +359,24 @@ async function extractCompletionText(
 		.map((block) => block.text)
 		.join("\n")
 		.trim();
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	return await new Promise<T>((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			reject(new Error(message));
+		}, timeoutMs);
+		timeout.unref?.();
+		void promise
+			.then((value) => {
+				clearTimeout(timeout);
+				resolve(value);
+			})
+			.catch((error) => {
+				clearTimeout(timeout);
+				reject(error);
+			});
+	});
 }
 
 class SelectorTimeoutError extends Error {
@@ -802,6 +821,239 @@ export class PersonaMemoryService {
 		dreamSkipAuditCache.delete(agentId);
 	}
 
+	private createMaintenanceClone(slug: string): { tempRoot: string; tempPersonaDir: string; livePersonaDir: string } {
+		this.ensurePersonaLayout(slug);
+		const tempRoot = mkdtempSync(join(tmpdir(), "nekoclaw-persona-maint-"));
+		const tempPersonaDir = join(tempRoot, ".nekoclaw-persona");
+		const livePersonaDir = this.store.getPersonaDir(slug);
+		cpSync(livePersonaDir, tempPersonaDir, { recursive: true, force: true });
+		return { tempRoot, tempPersonaDir, livePersonaDir };
+	}
+
+	private syncMaintenanceClone(
+		slug: string,
+		livePersonaDir: string,
+		tempPersonaDir: string,
+		result: MaintenanceExecutionResult,
+		options: { allowDeletes: boolean },
+	): void {
+		this.ensurePersonaLayout(slug);
+		const uniqueTouched = Array.from(new Set(result.touchedPaths));
+		for (const relativePath of uniqueTouched) {
+			if (!isIndexPath(relativePath) && !isAllowedMemoryPath(relativePath)) {
+				continue;
+			}
+			const tempPath = safeJoinPersonaPath(tempPersonaDir, relativePath);
+			if (!existsSync(tempPath)) {
+				continue;
+			}
+			writeTextFile(safeJoinPersonaPath(livePersonaDir, relativePath), readTextFile(tempPath, ""));
+		}
+		if (!options.allowDeletes) {
+			return;
+		}
+		for (const relativePath of Array.from(new Set(result.deletedPaths))) {
+			if (!isAllowedMemoryPath(relativePath)) {
+				continue;
+			}
+			removeFileIfExists(safeJoinPersonaPath(livePersonaDir, relativePath));
+		}
+	}
+
+	private async executeMaintenanceSession(
+		agent: AgentSpec,
+		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
+		input: {
+			mode: "formation" | "dream";
+			tempPersonaDir: string;
+			prompt: string;
+			maxConsumeObservationLines: number;
+			allowDeletes: boolean;
+		},
+	): Promise<MaintenanceExecutionResult> {
+		const modelConfig = this.resolveModel(agent, effectiveModel);
+		if (!modelConfig) {
+			throw new Error("No configured model available for persona maintenance.");
+		}
+		const authStorage = AuthStorage.inMemory();
+		if (modelConfig.apiKey) {
+			authStorage.setRuntimeApiKey(modelConfig.model.provider, modelConfig.apiKey);
+		}
+		const runtimeAgentDir = join(input.tempPersonaDir, ".maintenance-runtime");
+		const settingsManager = SettingsManager.inMemory({
+			compaction: {
+				enabled: false,
+			},
+		});
+		const modelRegistry = new ModelRegistry(authStorage, join(runtimeAgentDir, "models.json"));
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: input.tempPersonaDir,
+			agentDir: runtimeAgentDir,
+			settingsManager,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			systemPrompt: [
+				input.mode === "dream"
+					? "You are Nekoclaw Dream, a global persona memory maintainer."
+					: "You are Nekoclaw formation, a scene-local persona memory maintainer.",
+				"You are working inside a temporary clone of .nekoclaw-persona.",
+				"Use read/edit/write tools to maintain index.md and memory markdown files directly.",
+				"Existing files must be revised with edit. Use write only to create a new memory/people or memory/scenes file that does not exist yet.",
+				input.mode === "dream"
+					? "Dream may delete low-value memory/people or memory/scenes files when forgetting is appropriate, but it must preserve corrections, confirmed identity links, core relationships, and long-term background."
+					: "Formation must not delete any files.",
+				"Never modify observations/ or control/. Observations are evidence only.",
+				"Do not invent facts. Preserve uncertainty and preserve whether you only observed something or participated in it.",
+				"Before you finish, you must call persona_finalize exactly once.",
+			].join("\n"),
+			agentsFilesOverride: () => ({ agentsFiles: [] }),
+		});
+		await resourceLoader.reload();
+
+		const touchedPaths = new Set<string>();
+		const deletedPaths = new Set<string>();
+		let finalizeCount = 0;
+		let finalize: MaintenanceFinalizeDetails | undefined;
+
+		const readTool = createReadToolDefinition(input.tempPersonaDir, {
+			operations: {
+				access: async (absolutePath) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, absolutePath);
+					assertReadableMaintenancePath(relativePath);
+				},
+				readFile: async (absolutePath) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, absolutePath);
+					assertReadableMaintenancePath(relativePath);
+					return await import("node:fs/promises").then((fs) => fs.readFile(absolutePath));
+				},
+			},
+		});
+		const editTool = createEditToolDefinition(input.tempPersonaDir, {
+			operations: {
+				access: async (absolutePath) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, absolutePath);
+					assertEditableMaintenancePath(relativePath);
+					if (!existsSync(absolutePath)) {
+						throw new Error(`Edit target "${relativePath}" does not exist.`);
+					}
+				},
+				readFile: async (absolutePath) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, absolutePath);
+					assertEditableMaintenancePath(relativePath);
+					return await import("node:fs/promises").then((fs) => fs.readFile(absolutePath));
+				},
+				writeFile: async (absolutePath, content) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, absolutePath);
+					assertEditableMaintenancePath(relativePath);
+					touchedPaths.add(relativePath);
+					await import("node:fs/promises").then((fs) => fs.writeFile(absolutePath, content, "utf-8"));
+				},
+			},
+		});
+		const writeTool = createWriteToolDefinition(input.tempPersonaDir, {
+			operations: {
+				mkdir: async (dir) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, dir);
+					if (relativePath !== "memory/people" && relativePath !== "memory/scenes" && !relativePath.startsWith("memory/people/") && !relativePath.startsWith("memory/scenes/")) {
+						throw new Error(`Write can only create files under memory/people or memory/scenes. Received directory "${relativePath}".`);
+					}
+					await import("node:fs/promises").then((fs) => fs.mkdir(dir, { recursive: true }));
+				},
+				writeFile: async (absolutePath, content) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, absolutePath);
+					assertWritableMaintenancePath(relativePath);
+					if (existsSync(absolutePath)) {
+						throw new Error(`Write may only create new files. "${relativePath}" already exists; use edit instead.`);
+					}
+					touchedPaths.add(relativePath);
+					await import("node:fs/promises").then((fs) => fs.writeFile(absolutePath, content, "utf-8"));
+				},
+			},
+		});
+
+		const customTools: Array<ToolDefinition<any, any, any>> = [
+			readTool,
+			editTool,
+			writeTool,
+			{
+				name: "persona_finalize",
+				label: "Finalize Persona Maintenance",
+				description: "Finalize this maintenance run exactly once after all file edits are complete.",
+				parameters: PersonaFinalizeSchema,
+				execute: async (_toolCallId, params: { consumeObservationLines?: number; summary?: string }) => {
+					finalizeCount += 1;
+					if (finalizeCount > 1) {
+						throw new Error("persona_finalize may only be called once.");
+					}
+					finalize = {
+						consumeObservationLines:
+							input.mode === "dream"
+								? 0
+								: Math.max(
+										0,
+										Math.min(
+											input.maxConsumeObservationLines,
+											Math.floor(Number(params.consumeObservationLines ?? 0) || 0),
+										),
+									),
+						summary: normalizeText(params.summary),
+					};
+					return {
+						content: [{ type: "text", text: "Persona maintenance finalized." }],
+						details: {},
+					};
+				},
+			},
+		];
+		if (input.allowDeletes) {
+			customTools.push({
+				name: "delete_memory_file",
+				label: "Delete Memory File",
+				description: "Delete an existing memory/people or memory/scenes markdown file when Dream decides it should be forgotten.",
+				parameters: DeleteMemoryFileSchema,
+				execute: async (_toolCallId, params: { path: string }) => {
+					const relativePath = normalizeRelativeMaintenancePath(input.tempPersonaDir, params.path);
+					assertDeletableMaintenancePath(relativePath);
+					const absolutePath = safeJoinPersonaPath(input.tempPersonaDir, relativePath);
+					if (!existsSync(absolutePath)) {
+						throw new Error(`Cannot delete "${relativePath}" because it does not exist.`);
+					}
+					deletedPaths.add(relativePath);
+					rmSync(absolutePath, { force: true });
+					return {
+						content: [{ type: "text", text: `Deleted ${relativePath}.` }],
+						details: {},
+					};
+				},
+			});
+		}
+
+		const { session } = await createAgentSession({
+			cwd: input.tempPersonaDir,
+			agentDir: runtimeAgentDir,
+			authStorage,
+			modelRegistry,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(),
+			resourceLoader,
+			model: modelConfig.model,
+			thinkingLevel: effectiveModel?.thinkingLevel ?? agent.thinkingLevel,
+			tools: [],
+			customTools,
+		});
+		await withTimeout(session.prompt(input.prompt), MAINTENANCE_TIMEOUT_MS, `Persona maintenance timed out after ${MAINTENANCE_TIMEOUT_MS}ms.`);
+		if (finalizeCount !== 1 || !finalize) {
+			throw new Error(`persona_finalize must be called exactly once; saw ${finalizeCount}.`);
+		}
+		return {
+			finalize,
+			touchedPaths: Array.from(touchedPaths),
+			deletedPaths: Array.from(deletedPaths),
+		};
+	}
+
 	private async runFormationForTurn(input: {
 		agent: AgentSpec;
 		session: SessionRecord;
@@ -811,6 +1063,9 @@ export class PersonaMemoryService {
 		effectiveModel?: WorkerPayload["effectiveModel"];
 	}): Promise<void> {
 		this.ensurePersonaLayout(input.agent.slug);
+		if (!this.resolveModel(input.agent, input.effectiveModel)) {
+			return;
+		}
 		const sceneRef = buildSceneRef(input.session, input.event);
 		const observationPath = this.store.getPersonaObservationPath(input.agent.slug, sceneRef);
 		const observationLines = this.readObservationLines(observationPath);
@@ -821,32 +1076,54 @@ export class PersonaMemoryService {
 			return;
 		}
 		try {
-			const currentSceneMemoryPath = buildSceneMemoryPath(sceneRef);
-			const currentSceneMemory = readTextFile(
-				safeJoinPersonaPath(this.store.getPersonaDir(input.agent.slug), currentSceneMemoryPath),
-				"",
-			);
-			const existingDocs: PreparedPersonaContext["selectedMemories"] = [
-				...input.personaContext.selectedMemories,
-				...(currentSceneMemory ? [{ path: currentSceneMemoryPath, content: currentSceneMemory }] : []),
-			];
-			const result =
-				(await this.runFormationModel(input.agent, input.effectiveModel, {
-					indexMarkdown: input.personaContext.indexMarkdown,
-					sceneRef,
-					observationLines,
-					replyText: input.replyText,
-					currentMessage: collectEventText(input.event),
-					existingDocs,
-				})) ??
-				fallbackFormation({
-					sceneRef,
-					observationLines,
-					replyText: input.replyText,
-					event: input.event,
-					indexMarkdown: input.personaContext.indexMarkdown,
+			const clone = this.createMaintenanceClone(input.agent.slug);
+			try {
+				const result = await this.executeMaintenanceSession(input.agent, input.effectiveModel, {
+					mode: "formation",
+					tempPersonaDir: clone.tempPersonaDir,
+					maxConsumeObservationLines: observationLines.length,
+					allowDeletes: false,
+					prompt: [
+						`Maintain persona memory for scene ${sceneRef}.`,
+						"",
+						"Use tools to inspect and revise the temporary persona workspace.",
+						"Required files to inspect:",
+						"- index.md",
+						`- observations/${sceneRef}.log`,
+						...input.personaContext.selectedMemories.map((doc) => `- ${doc.path}`),
+						`- ${buildSceneMemoryPath(sceneRef)} (if it exists)`,
+						"",
+						`Current inbound message:\n${collectEventText(input.event) || "(empty)"}`,
+						"",
+						`Actual reply that was sent:\n${input.replyText || "(none)"}`,
+						"",
+						"Goals:",
+						"- Preserve persona memory as Markdown prose.",
+						"- Update index.md and any relevant people/scenes files using edit.",
+						"- You may create a new people/scenes file with write if needed.",
+						"- Do not delete files.",
+						"- Preserve corrections, identity links, uncertainty, and whether you observed or participated.",
+						"- When you finish, call persona_finalize with the number of observation lines from this scene log that were fully incorporated.",
+					].join("\n"),
 				});
-			this.applyFormationResult(input.agent.slug, sceneRef, observationPath, observationLines, result);
+				this.syncMaintenanceClone(input.agent.slug, clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: false });
+				const consumeCount = Math.max(0, Math.min(observationLines.length, result.finalize.consumeObservationLines ?? 0));
+				const remaining = observationLines.slice(consumeCount).join("\n");
+				if (remaining.trim().length === 0) {
+					rmSync(observationPath, { force: true });
+				} else {
+					writeTextFile(observationPath, `${remaining}\n`);
+				}
+				this.store.audit(input.agent.agentId, "persona.formation_applied", {
+					sceneRef,
+					writes: result.touchedPaths,
+					deletes: [],
+					consumedObservationLines: consumeCount,
+					summary: result.finalize.summary,
+				});
+			} finally {
+				rmSync(clone.tempRoot, { recursive: true, force: true });
+			}
 			this.clearFormationRetryState(input.agent.slug, sceneRef);
 		} catch (error) {
 			this.handleFormationFailure(input.agent, sceneRef, observationPath, observationLines, error);
@@ -855,6 +1132,9 @@ export class PersonaMemoryService {
 
 	private async runDream(agent: AgentSpec): Promise<void> {
 		this.ensurePersonaLayout(agent.slug);
+		if (!this.resolveModel(agent, undefined)) {
+			return;
+		}
 		this.clearDreamSkipAudit(agent.agentId);
 		const snapshot = this.buildDreamCorpusSnapshot(agent.slug);
 		if (
@@ -879,28 +1159,52 @@ export class PersonaMemoryService {
 			observationFiles: snapshot.observations.length,
 		});
 		try {
-			const planner =
-				(await this.runDreamPlanner(agent, snapshot)) ?? {
-					targets: [],
-					notes: "Dream planner unavailable; rewriting index only from current corpus snapshot.",
-				};
-			const result =
-				(await this.runDreamWriter(agent, snapshot, planner)) ?? {
-					indexMarkdown: snapshot.indexMarkdown,
-					writes: [],
-				};
-			this.applyDreamResult(agent.slug, result);
-			this.writeDreamState(agent.slug, {
-				lastAttemptedAt: new Date().toISOString(),
-				lastCompletedAt: new Date().toISOString(),
-				lastCorpusSignature: snapshot.corpusSignature,
-				lastError: undefined,
-			});
-			this.store.audit(agent.agentId, "persona.dream_applied", {
-				corpusSignature: snapshot.corpusSignature,
-				targets: planner.targets.map((target) => target.path),
-				writes: result.writes.map((write) => write.path),
-			});
+			const clone = this.createMaintenanceClone(agent.slug);
+			try {
+				const result = await this.executeMaintenanceSession(agent, undefined, {
+					mode: "dream",
+					tempPersonaDir: clone.tempPersonaDir,
+					maxConsumeObservationLines: 0,
+					allowDeletes: true,
+					prompt: [
+						"Perform a Dream pass over the entire persona workspace.",
+						"",
+						"Use tools to inspect index.md, all people/scenes memory files, and any observations files that help.",
+						"",
+						"Dream goals:",
+						"- Cross-scene linking for the same person.",
+						"- Rebuild index.md as a globally consistent snapshot.",
+						"- Compress stale low-value memories while preserving core identity and correction details.",
+						"- Create missing people files when repeated mentions across scenes justify it.",
+						"- You may delete low-value people/scenes files if forgetting them is appropriate, but only after updating index.md so references stay consistent.",
+						"- Never invent facts and never modify observations directly.",
+						"",
+						"Current corpus snapshot:",
+						`- index.md present: ${snapshot.indexMarkdown.trim().length > 0 ? "yes" : "no"}`,
+						`- people files: ${snapshot.people.length}`,
+						`- scene files: ${snapshot.scenes.length}`,
+						`- observation files: ${snapshot.observations.length}`,
+						"",
+						"Call persona_finalize exactly once when you are done. Dream must not consume observations, so finalize with consumeObservationLines=0.",
+					].join("\n"),
+				});
+				this.syncMaintenanceClone(agent.slug, clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: true });
+				const updatedSnapshot = this.buildDreamCorpusSnapshot(agent.slug);
+				this.store.audit(agent.agentId, "persona.dream_applied", {
+					corpusSignature: updatedSnapshot.corpusSignature,
+					touchedPaths: result.touchedPaths,
+					deletedPaths: result.deletedPaths,
+					summary: result.finalize.summary,
+				});
+				this.writeDreamState(agent.slug, {
+					lastAttemptedAt: new Date().toISOString(),
+					lastCompletedAt: new Date().toISOString(),
+					lastCorpusSignature: updatedSnapshot.corpusSignature,
+					lastError: undefined,
+				});
+			} finally {
+				rmSync(clone.tempRoot, { recursive: true, force: true });
+			}
 			this.clearDreamSkipAudit(agent.agentId);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -916,220 +1220,11 @@ export class PersonaMemoryService {
 		}
 	}
 
-	private async runDreamPlanner(agent: AgentSpec, snapshot: DreamCorpusSnapshot): Promise<DreamPlannerResult | undefined> {
-		const modelConfig = this.resolveModel(agent, undefined);
-		if (!modelConfig) {
-			return undefined;
-		}
-		const knownPaths = new Set<string>([
-			...snapshot.people.map((entry) => entry.path),
-			...snapshot.scenes.map((entry) => entry.path),
-			...snapshot.observations.map((entry) => entry.path),
-		]);
-		const context: Context = {
-			systemPrompt: [
-				"你是 Nekoclaw Dream 的全局记忆规划器。",
-				"你的任务是基于 index、所有 memory 文件摘要和 observations 摘要，决定本轮 Dream 最值得处理的少量目标文件。",
-				"Dream 负责跨场景关联、index 全局重整、全局老化、发现 formation 遗漏。",
-				"不能编造事实；只能基于给定语料做规划。",
-				`最多选择 ${DREAM_MAX_TARGETS} 个目标文件；每个目标最多引用 ${DREAM_MAX_SOURCE_PATHS} 个来源路径。`,
-				"允许重写已有 people/scenes 文件，允许创建新的 people 文件，允许只做 index 全局重整。",
-				"不要规划删除 people/scenes 文件。",
-				"输出必须是 JSON：{\"targets\":[{\"path\":\"memory/people/x.md\",\"sources\":[\"memory/scenes/a.md\"],\"reason\":\"...\"}],\"notes\":\"...\"}",
-			].join("\n"),
-			messages: [
-				{
-					role: "user",
-					content: [
-						`当前 index.md：\n${snapshot.indexMarkdown || "(empty)"}`,
-						`people 文件摘要：\n${
-							snapshot.people.length > 0
-								? snapshot.people
-										.map(
-											(entry) =>
-												`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | bytes=${entry.sizeBytes}\n${entry.excerpt || "(empty)"}`,
-										)
-										.join("\n\n")
-								: "(none)"
-						}`,
-						`scene 文件摘要：\n${
-							snapshot.scenes.length > 0
-								? snapshot.scenes
-										.map(
-											(entry) =>
-												`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | bytes=${entry.sizeBytes}\n${entry.excerpt || "(empty)"}`,
-										)
-										.join("\n\n")
-								: "(none)"
-						}`,
-						`observations 摘要：\n${
-							snapshot.observations.length > 0
-								? snapshot.observations
-										.map(
-											(entry) =>
-												`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | lines=${entry.lineCount}\n${entry.excerpt || "(empty)"}`,
-										)
-										.join("\n\n")
-								: "(none)"
-						}`,
-					].join("\n\n"),
-					timestamp: Date.now(),
-				},
-			],
-		};
-		const raw = await extractCompletionText(modelConfig.model, modelConfig.apiKey, context);
-		const json = extractJsonObject(raw);
-		if (!json) {
-			return undefined;
-		}
-		const parsed = JSON.parse(json) as Partial<DreamPlannerResult>;
-		const targets = (parsed.targets ?? [])
-			.filter(
-				(target): target is DreamPlannerTarget =>
-					Boolean(target && typeof target.path === "string" && typeof target.reason === "string" && Array.isArray(target.sources)),
-			)
-			.map((target) => {
-				const normalizedSources = target.sources
-					.filter((source): source is string => typeof source === "string")
-					.filter((source) => knownPaths.has(source))
-					.slice(0, DREAM_MAX_SOURCE_PATHS);
-				return {
-					path: target.path,
-					sources: normalizedSources,
-					reason: normalizeText(target.reason),
-				};
-			})
-			.filter((target) => isAllowedMemoryPath(target.path))
-			.filter((target, index, items) => items.findIndex((entry) => entry.path === target.path) === index)
-			.slice(0, DREAM_MAX_TARGETS);
-		return {
-			targets,
-			notes: normalizeText(parsed.notes) || "Dream planner selected no explicit targets.",
-		};
-	}
-
-	private async runDreamWriter(
-		agent: AgentSpec,
-		snapshot: DreamCorpusSnapshot,
-		planner: DreamPlannerResult,
-	): Promise<DreamResult | undefined> {
-		const modelConfig = this.resolveModel(agent, undefined);
-		if (!modelConfig) {
-			return undefined;
-		}
-		const corpusEntries = new Map<string, DreamCorpusEntry | DreamObservationEntry>([
-			...snapshot.people.map((entry) => [entry.path, entry] as const),
-			...snapshot.scenes.map((entry) => [entry.path, entry] as const),
-			...snapshot.observations.map((entry) => [entry.path, entry] as const),
-		]);
-		const targetDocs = planner.targets.map((target) => ({
-			path: target.path,
-			reason: target.reason,
-			existingContent: corpusEntries.get(target.path)?.content ?? "",
-			sourceDocs: target.sources
-				.filter((source) => isAllowedDreamSourcePath(source))
-				.map((source) => ({
-					path: source,
-					content:
-						source.startsWith("observations/")
-							? takeTailLinesWithinBudget(corpusEntries.get(source)?.content ?? "", 40, SCENE_OBSERVATION_TOKEN_BUDGET)
-							: corpusEntries.get(source)?.content ?? "",
-				}))
-				.filter((source) => source.content.trim().length > 0),
-		}));
-		const context: Context = {
-			systemPrompt: [
-				"你是 Nekoclaw Dream 的全局记忆整理器。",
-				"Dream 不替代 per-scene formation，而是做 formation 看不到的全局工作：跨场景关联、index 一致性重整、全局老化、发现遗漏人物。",
-				"你只能根据给定的记忆文件和 observations 写内容，不能编造文件里没有的信息。",
-				"observations 只作为补充线索，不消费、不删改。",
-				"纠偏信息、确认的身份关联、跨平台关联、核心关系和长期背景是高优先级内容，压缩时必须保留。",
-				"index.md 必须是 memory 文件内容的一致快照；可以清理 index 中指向不存在文件的引用。",
-				"只允许重写 index.md，以及重写/创建给定目标文件；不要删除任何 people/scenes 文件。",
-				"输出必须是 JSON：{\"indexMarkdown\":\"...\",\"writes\":[{\"path\":\"memory/people/x.md\",\"content\":\"...\"}]}",
-			].join("\n"),
-			messages: [
-				{
-					role: "user",
-					content: [
-						`当前 index.md：\n${snapshot.indexMarkdown || "(empty)"}`,
-						`全局 memory 摘要：\n${
-							[...snapshot.people, ...snapshot.scenes]
-								.map(
-									(entry) =>
-										`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | bytes=${entry.sizeBytes}\n${entry.excerpt || "(empty)"}`,
-								)
-								.join("\n\n") || "(none)"
-						}`,
-						`全局 observations 摘要：\n${
-							snapshot.observations.length > 0
-								? snapshot.observations
-										.map(
-											(entry) =>
-												`- ${entry.path} | lines=${entry.lineCount} | mtime=${new Date(entry.mtimeMs).toISOString()}\n${entry.excerpt || "(empty)"}`,
-										)
-										.join("\n\n")
-								: "(none)"
-						}`,
-						`Dream planner notes：${planner.notes || "(none)"}`,
-						`本轮目标文件：\n${
-							targetDocs.length > 0
-								? targetDocs
-										.map((target) =>
-											[
-												`### ${target.path}`,
-												`原因：${target.reason || "(none)"}`,
-												`现有内容：\n${target.existingContent || "(new file)"}`,
-												`相关来源：\n${
-													target.sourceDocs.length > 0
-														? target.sourceDocs.map((source) => `#### ${source.path}\n${source.content}`).join("\n\n")
-														: "(none)"
-												}`,
-											].join("\n\n"),
-										)
-										.join("\n\n")
-								: "(none)"
-						}`,
-					].join("\n\n"),
-					timestamp: Date.now(),
-				},
-			],
-		};
-		const raw = await extractCompletionText(modelConfig.model, modelConfig.apiKey, context);
-		const json = extractJsonObject(raw);
-		if (!json) {
-			return undefined;
-		}
-		const parsed = JSON.parse(json) as Partial<DreamResult>;
-		const allowedTargetPaths = new Set(planner.targets.map((target) => target.path));
-		const writes = (parsed.writes ?? [])
-			.filter((entry): entry is FormationWrite => Boolean(entry && typeof entry.path === "string" && typeof entry.content === "string"))
-			.filter((entry) => isAllowedMemoryPath(entry.path))
-			.filter((entry) => allowedTargetPaths.has(entry.path))
-			.map((entry) => ({
-				path: entry.path,
-				content: `${normalizeText(entry.content)}\n`,
-			}));
-		return {
-			indexMarkdown: normalizeText(parsed.indexMarkdown) || snapshot.indexMarkdown,
-			writes,
-		};
-	}
-
-	private applyDreamResult(slug: string, result: DreamResult): void {
-		this.ensurePersonaLayout(slug);
-		writeTextFile(this.store.getPersonaIndexPath(slug), `${normalizeText(result.indexMarkdown)}\n`);
-		const personaDir = this.store.getPersonaDir(slug);
-		for (const write of result.writes) {
-			if (!isAllowedMemoryPath(write.path)) {
-				continue;
-			}
-			writeTextFile(safeJoinPersonaPath(personaDir, write.path), `${normalizeText(write.content)}\n`);
-		}
-	}
-
 	private async runBacklogSweep(agent: AgentSpec): Promise<void> {
 		this.ensurePersonaLayout(agent.slug);
+		if (!this.resolveModel(agent, undefined)) {
+			return;
+		}
 		const observationsDir = this.store.getPersonaObservationsDir(agent.slug);
 		const files = existsSync(observationsDir)
 			? readdirSync(observationsDir).filter((name) => name.endsWith(".log")).sort()
@@ -1145,23 +1240,41 @@ export class PersonaMemoryService {
 				continue;
 			}
 			try {
-				const indexMarkdown = readTextFile(this.store.getPersonaIndexPath(agent.slug), "");
-				const result =
-					(await this.runFormationModel(agent, undefined, {
-						indexMarkdown,
-						sceneRef,
-						observationLines,
-						replyText: "",
-						currentMessage: "",
-						existingDocs: [],
-					})) ??
-					fallbackFormation({
-						sceneRef,
-						observationLines,
-						replyText: "",
-						indexMarkdown,
+				const clone = this.createMaintenanceClone(agent.slug);
+				try {
+					const result = await this.executeMaintenanceSession(agent, undefined, {
+						mode: "formation",
+						tempPersonaDir: clone.tempPersonaDir,
+						maxConsumeObservationLines: observationLines.length,
+						allowDeletes: false,
+						prompt: [
+							`Maintain persona memory for scene ${sceneRef} from backlog observations.`,
+							"",
+							"Inspect index.md, the scene observation log, and any relevant memory files you need.",
+							"Revise existing files with edit, create new people/scenes files with write when necessary, and do not delete files.",
+							"Preserve corrections, identity links, uncertainty, and whether the bot was only observing.",
+							`Primary observation file: observations/${sceneRef}.log`,
+							"When finished, call persona_finalize with how many observation lines were fully incorporated.",
+						].join("\n"),
 					});
-				this.applyFormationResult(agent.slug, sceneRef, observationPath, observationLines, result);
+					this.syncMaintenanceClone(agent.slug, clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: false });
+					const consumeCount = Math.max(0, Math.min(observationLines.length, result.finalize.consumeObservationLines ?? 0));
+					const remaining = observationLines.slice(consumeCount).join("\n");
+					if (remaining.trim().length === 0) {
+						rmSync(observationPath, { force: true });
+					} else {
+						writeTextFile(observationPath, `${remaining}\n`);
+					}
+					this.store.audit(agent.agentId, "persona.formation_applied", {
+						sceneRef,
+						writes: result.touchedPaths,
+						deletes: [],
+						consumedObservationLines: consumeCount,
+						summary: result.finalize.summary,
+					});
+				} finally {
+					rmSync(clone.tempRoot, { recursive: true, force: true });
+				}
 				this.clearFormationRetryState(agent.slug, sceneRef);
 			} catch (error) {
 				this.handleFormationFailure(agent, sceneRef, observationPath, observationLines, error);
@@ -1205,121 +1318,6 @@ export class PersonaMemoryService {
 			updatedAt: new Date().toISOString(),
 			lastError: errorMessage,
 		} satisfies FormationRetryState);
-	}
-
-	private async runFormationModel(
-		agent: AgentSpec,
-		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
-		input: {
-			indexMarkdown: string;
-			sceneRef: string;
-			observationLines: string[];
-			replyText: string;
-			currentMessage: string;
-			existingDocs: PreparedPersonaContext["selectedMemories"];
-		},
-	): Promise<FormationResult | undefined> {
-		const modelConfig = this.resolveModel(agent, effectiveModel);
-		if (!modelConfig) {
-			return undefined;
-		}
-		const context: Context = {
-			systemPrompt: [
-				"你是 Nekoclaw 的后台记忆整理器（formation）。",
-				"你维护的记忆内容只有 Markdown 自然语言，不允许把人物记忆拆成结构化字段。",
-				"遵循这些原则：索引常驻，正文按需；旁观不能写成参与；不确定不能写成确定；优先保留长期背景、共同经历、关系动态、纠偏和未完事项；删掉琐碎、过期、重复、一次性闲聊。",
-				`index.md 目标不超过约 ${INDEX_TOKEN_BUDGET} tokens；单个正文文件目标不超过约 ${MEMORY_FILE_TOKEN_BUDGET} tokens。`,
-				"你可以重写 index.md，并新增/改写 memory/people/*.md 或 memory/scenes/*.md。",
-				"输出必须是 JSON，格式：",
-				"{\"indexMarkdown\":\"...\",\"writes\":[{\"path\":\"memory/people/x.md\",\"content\":\"...\"}],\"deletes\":[\"memory/people/y.md\"],\"consumeObservationLines\":3}",
-				"所有 content 都必须是 Markdown 自然语言正文，不要返回 schema 化事实表。",
-			].join("\n"),
-			messages: [
-				{
-					role: "user",
-					content: [
-						`本轮当前消息：\n${input.currentMessage || "(none)"}`,
-						`本轮实际回复：\n${input.replyText || "(none)"}`,
-						`当前 index.md：\n${input.indexMarkdown || "(empty)"}`,
-						`当前 sceneRef：${input.sceneRef}`,
-						`当前 scene observation lines：\n${input.observationLines.join("\n")}`,
-						`相关已读记忆正文：\n${
-							input.existingDocs.length > 0
-								? input.existingDocs.map((doc) => `### ${doc.path}\n${doc.content}`).join("\n\n")
-								: "(none)"
-						}`,
-					].join("\n\n"),
-					timestamp: Date.now(),
-				},
-			],
-		};
-		try {
-			const raw = await extractCompletionText(modelConfig.model, modelConfig.apiKey, context);
-			const json = extractJsonObject(raw);
-			if (!json) {
-				return undefined;
-			}
-			const parsed = JSON.parse(json) as Partial<FormationResult>;
-			const writes = (parsed.writes ?? [])
-				.filter((entry): entry is FormationWrite => Boolean(entry && typeof entry.path === "string" && typeof entry.content === "string"))
-				.filter((entry) => isAllowedMemoryPath(entry.path))
-				.map((entry) => ({
-					path: entry.path,
-					content: `${normalizeText(entry.content)}\n`,
-				}));
-			const deletes = (parsed.deletes ?? [])
-				.filter((value): value is string => typeof value === "string")
-				.filter((value) => isAllowedMemoryPath(value));
-			const consumeObservationLines = Math.max(
-				0,
-				Math.min(input.observationLines.length, Math.floor(Number(parsed.consumeObservationLines ?? 0) || 0)),
-			);
-			return {
-				indexMarkdown: normalizeText(parsed.indexMarkdown) || input.indexMarkdown,
-				writes,
-				deletes,
-				consumeObservationLines,
-			};
-		} catch {
-			return undefined;
-		}
-	}
-
-	private applyFormationResult(
-		slug: string,
-		sceneRef: string,
-		observationPath: string,
-		observationLines: string[],
-		result: FormationResult,
-	): void {
-		this.ensurePersonaLayout(slug);
-		writeTextFile(this.store.getPersonaIndexPath(slug), `${normalizeText(result.indexMarkdown)}\n`);
-		const personaDir = this.store.getPersonaDir(slug);
-		for (const write of result.writes) {
-			if (!isAllowedMemoryPath(write.path)) {
-				continue;
-			}
-			writeTextFile(safeJoinPersonaPath(personaDir, write.path), `${normalizeText(write.content)}\n`);
-		}
-		for (const target of result.deletes) {
-			if (!isAllowedMemoryPath(target)) {
-				continue;
-			}
-			removeFileIfExists(safeJoinPersonaPath(personaDir, target));
-		}
-		const consumeCount = Math.max(0, Math.min(observationLines.length, result.consumeObservationLines));
-		const remaining = observationLines.slice(consumeCount).join("\n");
-		if (remaining.trim().length === 0) {
-			rmSync(observationPath, { force: true });
-		} else {
-			writeTextFile(observationPath, `${remaining}\n`);
-		}
-		this.store.audit(this.store.getAgentByRef(slug).agentId, "persona.formation_applied", {
-			sceneRef,
-			writes: result.writes.map((write) => write.path),
-			deletes: result.deletes,
-			consumedObservationLines: consumeCount,
-		});
 	}
 
 	private readObservationLines(path: string): string[] {

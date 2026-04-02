@@ -8,18 +8,26 @@ const clientMocks = vi.hoisted(() => {
 	const instances: FakeClient[] = [];
 
 	class FakeClient {
-		handlers = new Map<string, Array<(value: unknown) => void>>();
+		handlers = new Map<string, Array<(value: unknown) => void | Promise<void>>>();
 		connected = false;
 		started = false;
 		startCalls = 0;
 		startFailures: Error[] = [];
 		connection: { readyState: number } | undefined;
+		groupInfo = new Map<string, { group_id: number; group_name: string; member_count: number; max_member_count: number }>();
+		groupList: Array<{ group_id: number; group_name: string; member_count: number; max_member_count: number }> = [];
 		callApi = vi.fn(async (action: string, params: Record<string, unknown>) => {
 			if (action === "send_private_msg") {
 				return 101;
 			}
 			if (action === "send_group_msg") {
 				return 202;
+			}
+			if (action === "get_group_info") {
+				return this.groupInfo.get(String(params.group_id));
+			}
+			if (action === "get_group_list") {
+				return this.groupList;
 			}
 			return undefined;
 		});
@@ -36,7 +44,7 @@ const clientMocks = vi.hoisted(() => {
 		) {
 			instances.push(this);
 		}
-		on(event: string, handler: (value: unknown) => void): this {
+		on(event: string, handler: (value: unknown) => void | Promise<void>): this {
 			const existing = this.handlers.get(event) ?? [];
 			existing.push(handler);
 			this.handlers.set(event, existing);
@@ -72,9 +80,9 @@ const clientMocks = vi.hoisted(() => {
 		async DownloadFile(url: string, threadCount: number, headers: string[] | string, base64?: string): Promise<{ file: string }> {
 			return this.downloadFile(url, threadCount, headers, base64);
 		}
-		emit(event: string, payload: unknown): void {
+		async emit(event: string, payload: unknown): Promise<void> {
 			for (const handler of this.handlers.get(event) ?? []) {
-				handler(payload);
+				await handler(payload);
 			}
 		}
 	}
@@ -208,6 +216,175 @@ describe("napcat channel plugin", () => {
 				displayName: "Builder",
 			},
 		});
+	});
+
+	it("enriches missing QQ group titles from get_group_info before forwarding inbound events", async () => {
+		const plugin = await createTestPlugin({
+			config: { accessToken: undefined },
+		});
+		const client = clientMocks.instances[0];
+		client.groupInfo.set("777", {
+			group_id: 777,
+			group_name: "TIAL Members",
+			member_count: 47,
+			max_member_count: 500,
+		});
+		const events: InboundMessageEvent[] = [];
+
+		plugin.startPolling({
+			onEvent: async (event) => {
+				events.push(event);
+			},
+		});
+		await client.emit("message.group.normal", {
+			post_type: "message",
+			message_type: "group",
+			sub_type: "normal",
+			time: 1711680000,
+			self_id: 999,
+			user_id: 555,
+			group_id: 777,
+			message_id: 30,
+			raw_message: "hello group",
+			message: [{ type: "text", data: { text: "hello group" } }],
+			sender: {
+				user_id: 555,
+				nickname: "Bob",
+				card: "Builder",
+				sex: "male",
+				age: 20,
+				area: "",
+				level: "",
+				role: "member",
+				title: "",
+			},
+			anonymous: null,
+		});
+
+		expect(events[0]?.chatTitle).toBe("TIAL Members");
+		expect(client.callApi).toHaveBeenCalledWith(
+			"get_group_info",
+			expect.objectContaining({
+				group_id: 777,
+			}),
+		);
+	});
+
+	it("falls back to get_group_list when get_group_info cannot provide a QQ group title", async () => {
+		const plugin = await createTestPlugin({
+			config: { accessToken: undefined },
+		});
+		const client = clientMocks.instances[0];
+		client.groupList = [
+			{
+				group_id: 777,
+				group_name: "TIAL Members",
+				member_count: 47,
+				max_member_count: 500,
+			},
+		];
+		client.callApi.mockImplementation(async (action: string, params: Record<string, unknown>) => {
+			if (action === "send_private_msg") {
+				return 101;
+			}
+			if (action === "send_group_msg") {
+				return 202;
+			}
+			if (action === "get_group_info") {
+				throw new Error("group info unavailable");
+			}
+			if (action === "get_group_list") {
+				return client.groupList;
+			}
+			return undefined;
+		});
+		const events: InboundMessageEvent[] = [];
+
+		plugin.startPolling({
+			onEvent: async (event) => {
+				events.push(event);
+			},
+		});
+		await client.emit("message.group.normal", {
+			post_type: "message",
+			message_type: "group",
+			sub_type: "normal",
+			time: 1711680000,
+			self_id: 999,
+			user_id: 555,
+			group_id: 777,
+			message_id: 31,
+			raw_message: "hello group",
+			message: [{ type: "text", data: { text: "hello group" } }],
+			sender: {
+				user_id: 555,
+				nickname: "Bob",
+				card: "Builder",
+				sex: "male",
+				age: 20,
+				area: "",
+				level: "",
+				role: "member",
+				title: "",
+			},
+			anonymous: null,
+		});
+
+		expect(events[0]?.chatTitle).toBe("TIAL Members");
+		expect(client.callApi).toHaveBeenCalledWith("get_group_list", {});
+	});
+
+	it("caches QQ group titles after they are discovered", async () => {
+		const plugin = await createTestPlugin({
+			config: { accessToken: undefined },
+		});
+		const client = clientMocks.instances[0];
+		client.groupInfo.set("777", {
+			group_id: 777,
+			group_name: "TIAL Members",
+			member_count: 47,
+			max_member_count: 500,
+		});
+		const events: InboundMessageEvent[] = [];
+
+		plugin.startPolling({
+			onEvent: async (event) => {
+				events.push(event);
+			},
+		});
+		const emitMessage = (messageId: number) =>
+			client.emit("message.group.normal", {
+				post_type: "message",
+				message_type: "group",
+				sub_type: "normal",
+				time: 1711680000 + messageId,
+				self_id: 999,
+				user_id: 555,
+				group_id: 777,
+				message_id: messageId,
+				raw_message: `hello ${messageId}`,
+				message: [{ type: "text", data: { text: `hello ${messageId}` } }],
+				sender: {
+					user_id: 555,
+					nickname: "Bob",
+					card: "Builder",
+					sex: "male",
+					age: 20,
+					area: "",
+					level: "",
+					role: "member",
+					title: "",
+				},
+				anonymous: null,
+			});
+
+		await emitMessage(32);
+		await emitMessage(33);
+
+		expect(events.map((event) => event.chatTitle)).toEqual(["TIAL Members", "TIAL Members"]);
+		expect(
+			client.callApi.mock.calls.filter(([action]) => action === "get_group_info"),
+		).toHaveLength(1);
 	});
 
 		it("captures at-mentions for mention-only group triggering", async () => {
@@ -347,7 +524,7 @@ describe("napcat channel plugin", () => {
 			payload: { text: "bot says hi" },
 		});
 
-		client.emit("message.group.normal", {
+		await client.emit("message.group.normal", {
 			post_type: "message",
 			message_type: "group",
 			sub_type: "normal",
@@ -374,7 +551,7 @@ describe("napcat channel plugin", () => {
 			},
 			anonymous: null,
 		});
-		client.emit("message.group.normal", {
+		await client.emit("message.group.normal", {
 			post_type: "message",
 			message_type: "group",
 			sub_type: "normal",
@@ -401,8 +578,6 @@ describe("napcat channel plugin", () => {
 			},
 			anonymous: null,
 		});
-
-		await Promise.resolve();
 
 		expect(events[0]?.replyToMessageId).toBe("202");
 		expect(events[0]?.isReplyToBot).toBe(true);
@@ -645,7 +820,7 @@ describe("napcat channel plugin", () => {
 			},
 		});
 
-		client.emit("message.private.friend", {
+		await client.emit("message.private.friend", {
 			post_type: "message",
 			message_type: "private",
 			sub_type: "friend",
@@ -657,7 +832,7 @@ describe("napcat channel plugin", () => {
 			message: [{ type: "text", data: { text: "hello dm" } }],
 			sender: { user_id: 123456, nickname: "Alice" },
 		});
-		client.emit("message.group.normal", {
+		await client.emit("message.group.normal", {
 			post_type: "message",
 			message_type: "group",
 			sub_type: "normal",
@@ -681,8 +856,6 @@ describe("napcat channel plugin", () => {
 			},
 			anonymous: null,
 		});
-
-		await Promise.resolve();
 
 		expect(events).toEqual([
 			{ chatId: "123456", chatKind: "dm", text: "hello dm" },
@@ -798,7 +971,7 @@ describe("napcat channel plugin", () => {
 				errors.push(error.message);
 			},
 		});
-		client.emit("error", { message: "temporary issue" });
+		await client.emit("error", { message: "temporary issue" });
 
 		await plugin.actions.send({
 			chatId: "123456",
@@ -828,7 +1001,7 @@ describe("napcat channel plugin", () => {
 		await Promise.resolve();
 
 		client.connection = undefined;
-		client.emit("close", { code: 1006 });
+		await client.emit("close", { code: 1006 });
 		expect(client.startCalls).toBe(1);
 		expect(healthy).toHaveBeenCalledTimes(0);
 
@@ -860,7 +1033,7 @@ describe("napcat channel plugin", () => {
 		client.startFailures.push(new Error("first reconnect failed"), new Error("second reconnect failed"));
 
 		client.connection = undefined;
-		client.emit("disconnect", {});
+		await client.emit("disconnect", {});
 
 		await vi.advanceTimersByTimeAsync(1_000);
 		expect(client.startCalls).toBe(2);
@@ -889,7 +1062,7 @@ describe("napcat channel plugin", () => {
 		await Promise.resolve();
 
 		client.connection = undefined;
-		client.emit("close", { code: 1006 });
+		await client.emit("close", { code: 1006 });
 		plugin.stop();
 		await vi.advanceTimersByTimeAsync(30_000);
 

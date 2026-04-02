@@ -173,6 +173,7 @@ function normalizeLastRoute(
 export function normalizeSessionConfig(agentSlug: string, session: SessionConfig): SessionConfig {
 	const externalConversationId = session.externalConversationId.trim();
 	const threadId = session.threadId?.trim() || undefined;
+	const chatTitle = session.chatTitle?.trim() || undefined;
 	const modelOverride =
 		session.modelOverride?.provider?.trim() && session.modelOverride.modelId?.trim()
 			? {
@@ -184,6 +185,7 @@ export function normalizeSessionConfig(agentSlug: string, session: SessionConfig
 	return {
 		...session,
 		externalConversationId,
+		chatTitle,
 		sessionKey:
 			session.sessionKey?.trim() ||
 			buildSessionKey({
@@ -307,6 +309,7 @@ export function normalizeSessionRecord(
 		externalConversationId: normalized.externalConversationId,
 		threadId: normalized.threadId,
 		chatKind: normalized.chatKind,
+		chatTitle: normalized.chatTitle,
 		lastRoute: normalized.lastRoute,
 		modelOverride: normalized.modelOverride,
 		status: normalized.status,

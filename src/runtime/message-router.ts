@@ -56,6 +56,9 @@ export class MessageRouterService {
 		this.personaMemory.recordInbound(agent.agentId, session, hydratedEvent);
 		const canProcessNormally = plugin?.triggering.shouldProcessEvent(hydratedEvent) ?? true;
 		if (session) {
+			if (hydratedEvent.chatKind === "group" && hydratedEvent.chatTitle?.trim()) {
+				this.store.updateSessionChatTitle(agent.agentId, session.sessionRecordId, hydratedEvent.chatTitle);
+			}
 			this.store.updateSessionLastRoute(agent.agentId, session.sessionRecordId, {
 				externalConversationId: sessionAddress.externalConversationId,
 				threadId: sessionAddress.threadId,

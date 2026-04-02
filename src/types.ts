@@ -77,6 +77,7 @@ export interface SessionConfig {
 	externalConversationId: string;
 	channelType: ChannelType;
 	chatKind: ChatKind;
+	chatTitle?: string;
 	sessionKey: string;
 	parentSessionKey?: string;
 	threadId?: string;
@@ -144,6 +145,7 @@ export interface SessionRecord {
 	externalConversationId: string;
 	threadId?: string;
 	chatKind: ChatKind;
+	chatTitle?: string;
 	lastRoute?: SessionLastRoute;
 	modelOverride?: SessionModelOverride;
 	status: "active" | "removed";
@@ -300,6 +302,7 @@ export interface ChannelPollCallbacks {
 	onEvent: (event: InboundMessageEvent) => Promise<void> | void;
 	onError?: (error: Error) => void;
 	onHealthy?: () => void;
+	onGroupTitles?: (titles: Array<{ chatId: string; title: string }>) => void;
 }
 
 export interface ChannelSendInput {

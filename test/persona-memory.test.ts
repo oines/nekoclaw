@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -381,12 +381,13 @@ describe("persona memory service", () => {
 		expect(() => readFileSync(join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"), "utf-8")).toThrow();
 	});
 
-	it("runs fallback formation asynchronously after 50 observations and consumes processed observations", async () => {
+	it("runs tool-driven formation asynchronously after 50 observations and consumes processed observations", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
 
 		const store = new JsonNekoclawStore();
-		const agent = store.createAgent({ slug: "formation-cat" });
+		let agent = store.createAgent({ slug: "formation-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "111",
@@ -419,6 +420,25 @@ describe("persona memory service", () => {
 			personaMemory.recordInbound(agent.agentId, session, event);
 		}
 		const context = await personaMemory.buildPreparedContext(agent, session, event);
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+			writeFileSync(
+				join(input.tempPersonaDir, "index.md"),
+				"## 我认识的人和场景\n- 张三：GPU 租赁平台 → memory/people/telegram-111.md\n- telegram-dm-111：近期互动 → memory/scenes/telegram-dm-111.md\n",
+			);
+			writeFileSync(
+				join(input.tempPersonaDir, "memory/people/telegram-111.md"),
+				"张三在做一个 GPU 租赁平台。\n",
+			);
+			writeFileSync(
+				join(input.tempPersonaDir, "memory/scenes/telegram-dm-111.md"),
+				"这个场景里张三一直在聊 GPU 租赁平台。\n",
+			);
+			return {
+				finalize: { consumeObservationLines: 50, summary: "updated person and scene" },
+				touchedPaths: ["index.md", "memory/people/telegram-111.md", "memory/scenes/telegram-dm-111.md"],
+				deletedPaths: [],
+			};
+		});
 
 		personaMemory.scheduleFormation({
 			agent,
@@ -440,7 +460,8 @@ describe("persona memory service", () => {
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
 
 		const store = new JsonNekoclawStore();
-		const agent = store.createAgent({ slug: "backlog-cat" });
+		let agent = store.createAgent({ slug: "backlog-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "-1001",
@@ -463,6 +484,21 @@ describe("persona memory service", () => {
 			}),
 		);
 		vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-01T00:40:00.000Z").getTime());
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+			writeFileSync(
+				join(input.tempPersonaDir, "index.md"),
+				"## 我在的群\n- telegram-group-1001：近期聊招人 → memory/scenes/telegram-group-1001.md\n",
+			);
+			writeFileSync(
+				join(input.tempPersonaDir, "memory/scenes/telegram-group-1001.md"),
+				"这个群最近有人提到项目开始招人。\n",
+			);
+			return {
+				finalize: { consumeObservationLines: 1, summary: "rolled backlog into scene memory" },
+				touchedPaths: ["index.md", "memory/scenes/telegram-group-1001.md"],
+				deletedPaths: [],
+			};
+		});
 
 		personaMemory.queueBacklogSweep(agent);
 		await waitForBackgroundWork();
@@ -475,23 +511,17 @@ describe("persona memory service", () => {
 	it("discards the same backlog after three failed formation attempts and starts accumulating fresh observations again", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
-		const fs = await import("../src/store/fs.js");
 
 		const store = new JsonNekoclawStore();
-		const agent = store.createAgent({ slug: "discard-cat" });
+		let agent = store.createAgent({ slug: "discard-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "-1001",
 			chatKind: "group",
 		});
 		const personaMemory = new PersonaMemoryService(store);
-		const actualWriteTextFile = fs.writeTextFile;
-		vi.spyOn(fs, "writeTextFile").mockImplementation((path, value, options) => {
-			if (path.includes(".nekoclaw-persona") && !path.includes("/control/formation-retries/")) {
-				throw new Error("simulated persona write failure");
-			}
-			return actualWriteTextFile(path, value, options);
-		});
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockRejectedValue(new Error("simulated maintenance failure"));
 
 		for (let index = 1; index <= 50; index += 1) {
 			personaMemory.recordInbound(
@@ -515,7 +545,7 @@ describe("persona memory service", () => {
 			await waitForBackgroundWork();
 		}
 
-		expect(() => readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toThrow();
+		expect(existsSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"))).toBe(false);
 		const audits = store.getAuditEntries(agent.agentId);
 		expect(audits.filter((entry) => entry.kind === "persona.formation_failed")).toHaveLength(3);
 		expect(audits.some((entry) => entry.kind === "persona.formation_discarded")).toBe(true);
@@ -663,13 +693,17 @@ describe("persona memory service", () => {
 				occurredAt: "2026-04-01T00:00:00.000Z",
 			}),
 		);
-		vi.spyOn(personaMemory as any, "runDreamPlanner").mockResolvedValue({
-			targets: [{ path: "memory/people/known.md", sources: [], reason: "refresh" }],
-			notes: "rewrite one person",
-		});
-		vi.spyOn(personaMemory as any, "runDreamWriter").mockResolvedValue({
-			indexMarkdown: "## 我认识的人\n- 已知人物：更新后 → memory/people/known.md",
-			writes: [{ path: "memory/people/known.md", content: "更新后的 Dream 记忆。\n" }],
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+			writeFileSync(
+				join(input.tempPersonaDir, "index.md"),
+				"## 我认识的人\n- 已知人物：更新后 → memory/people/known.md\n",
+			);
+			writeFileSync(join(input.tempPersonaDir, "memory/people/known.md"), "更新后的 Dream 记忆。\n");
+			return {
+				finalize: { consumeObservationLines: 0, summary: "dream refreshed one person" },
+				touchedPaths: ["index.md", "memory/people/known.md"],
+				deletedPaths: [],
+			};
 		});
 
 		personaMemory.queueDream(agent, { force: true });
@@ -681,6 +715,54 @@ describe("persona memory service", () => {
 		const audits = store.getAuditEntries(agent.agentId);
 		expect(audits.some((entry) => entry.kind === "persona.dream_started")).toBe(true);
 		expect(audits.some((entry) => entry.kind === "persona.dream_applied")).toBe(true);
+	});
+
+	it("lets dream delete low-value memory files while keeping observations untouched", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "dream-delete-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "-1001",
+			chatKind: "group",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(store.getPersonaIndexPath(agent.slug), "## 我认识的人\n- 低价值人物 → memory/people/obsolete.md\n");
+		writeTextFile(join(store.getPersonaPeopleDir(agent.slug), "obsolete.md"), "一个已经长期无关紧要的人物。\n");
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "telegram",
+				chatId: "-1001",
+				chatKind: "group",
+				messageId: "1",
+				senderId: "101",
+				senderName: "群友",
+				text: "Dream 删除人物时 observation 仍然要保留",
+				occurredAt: "2026-04-01T00:00:00.000Z",
+			}),
+		);
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+			writeFileSync(join(input.tempPersonaDir, "index.md"), "## 我认识的人\n");
+			rmSync(join(input.tempPersonaDir, "memory/people/obsolete.md"));
+			return {
+				finalize: { consumeObservationLines: 0, summary: "forgot one obsolete person" },
+				touchedPaths: ["index.md"],
+				deletedPaths: ["memory/people/obsolete.md"],
+			};
+		});
+
+		personaMemory.queueDream(agent, { force: true });
+		await personaMemory.whenIdle(agent.agentId);
+
+		expect(readFileSync(store.getPersonaIndexPath(agent.slug), "utf-8")).not.toContain("obsolete.md");
+		expect(existsSync(join(store.getPersonaPeopleDir(agent.slug), "obsolete.md"))).toBe(false);
+		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toContain("Dream 删除人物时 observation 仍然要保留");
 	});
 
 	it("records dream failures without breaking existing persona files or consuming observations", async () => {
@@ -712,7 +794,7 @@ describe("persona memory service", () => {
 				occurredAt: "2026-04-01T00:00:00.000Z",
 			}),
 		);
-		vi.spyOn(personaMemory as any, "runDreamPlanner").mockRejectedValue(new Error("planner boom"));
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockRejectedValue(new Error("dream boom"));
 
 		personaMemory.queueDream(agent, { force: true });
 		await personaMemory.whenIdle(agent.agentId);

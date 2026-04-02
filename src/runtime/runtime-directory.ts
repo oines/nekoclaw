@@ -156,9 +156,10 @@ function addSession(
 		});
 		return;
 	}
-		upsertGroup(groups, {
-			groupRef: buildGroupRef(session.channelType, session.externalConversationId),
-			channel: toExposedChannel(session.channelType),
+	upsertGroup(groups, {
+		groupRef: buildGroupRef(session.channelType, session.externalConversationId),
+		title: session.chatTitle,
+		channel: toExposedChannel(session.channelType),
 		lastSeenAt: session.updatedAt,
 		pairedSessionKey: session.sessionKey,
 	});

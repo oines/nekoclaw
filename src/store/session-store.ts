@@ -67,6 +67,7 @@ export class SessionStore {
 			channelType: ChannelType;
 			externalConversationId: string;
 			chatKind: ChatKind;
+			chatTitle?: string;
 			threadId?: string;
 			parentSessionKey?: string;
 			sessionKey?: string;
@@ -93,6 +94,7 @@ export class SessionStore {
 				externalConversationId: input.externalConversationId,
 				channelType: input.channelType,
 				chatKind: input.chatKind,
+				chatTitle: input.chatTitle,
 				sessionKey,
 				parentSessionKey: input.parentSessionKey,
 				threadId: input.threadId,
@@ -129,6 +131,22 @@ export class SessionStore {
 				updatedAt: nowIso(),
 			};
 			session.updatedAt = session.lastRoute.updatedAt;
+			storeConfig.agents[slug].updatedAt = session.updatedAt;
+		});
+		return this.getSession(config.agentId, current.sessionRecordId);
+	}
+
+	updateSessionChatTitle(agentRef: string, sessionRef: string, chatTitle: string): SessionRecord {
+		const { slug, config } = this.repo.getAgentEntry(agentRef);
+		const current = this.getSession(config.agentId, sessionRef);
+		const normalizedTitle = chatTitle.trim();
+		if (!normalizedTitle || current.chatTitle === normalizedTitle) {
+			return current;
+		}
+		this.repo.updateConfig((storeConfig) => {
+			const session = storeConfig.agents[slug].sessions[current.sessionRecordId];
+			session.chatTitle = normalizedTitle;
+			session.updatedAt = nowIso();
 			storeConfig.agents[slug].updatedAt = session.updatedAt;
 		});
 		return this.getSession(config.agentId, current.sessionRecordId);

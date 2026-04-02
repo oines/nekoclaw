@@ -47,6 +47,18 @@ export class ChannelRuntimeService {
 							onEvent: async (event) => {
 								await this.onEvent(agent.agentId, channel.type, event);
 							},
+							onGroupTitles: (titles) => {
+								for (const title of titles) {
+									const session = this.store.findSessionByAddress(agent.agentId, {
+										channelType: channel.type,
+										externalConversationId: title.chatId,
+										chatKind: "group",
+									});
+									if (session) {
+										this.store.updateSessionChatTitle(agent.agentId, session.sessionRecordId, title.title);
+									}
+								}
+							},
 							onError: (error) => {
 							this.store.updateAgent(agent.agentId, { lastError: error.message });
 								this.store.audit(agent.agentId, `${channel.type}.poll_error`, {

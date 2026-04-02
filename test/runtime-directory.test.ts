@@ -189,4 +189,44 @@ describe("runtime directory service", () => {
 			]),
 		);
 	});
+
+	it("uses persisted session chat titles for known QQ groups even without a current titled event", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { RuntimeDirectoryService } = await import("../src/runtime/runtime-directory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "directory-qq-persisted" });
+		store.createChannel(agent.agentId, "napcat");
+		const groupSession = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "244962071",
+			chatKind: "group",
+		});
+		store.updateSessionChatTitle(agent.agentId, groupSession.sessionRecordId, "TIAL Members");
+
+		const service = new RuntimeDirectoryService(store);
+		const snapshot = service.buildSnapshot(
+			agent,
+			groupSession,
+			createEvent({
+				channelType: "napcat",
+				chatId: "244962071",
+				chatKind: "group",
+				messageId: "m2",
+				senderId: "3184675714",
+				senderName: "oines",
+				text: "hello group",
+				occurredAt: "2026-04-02T08:25:00.000Z",
+			}),
+		);
+
+		expect(snapshot.groups).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					groupRef: "qq:group:244962071",
+					title: "TIAL Members",
+				}),
+			]),
+		);
+	});
 });

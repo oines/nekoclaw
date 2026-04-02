@@ -42,6 +42,11 @@ export interface NapcatClientLike {
 	connection?: { readyState?: number };
 }
 
+type NapcatGroupInfoLike = {
+	group_id?: unknown;
+	group_name?: unknown;
+};
+
 const NAPCAT_MESSAGE_EVENTS: NapcatMessageEventName[] = [
 	"message.private.friend",
 	"message.private.group",
@@ -357,6 +362,9 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 	private callbacks: ChannelPollCallbacks | undefined;
 	private readonly client: NapcatClientLike;
 	private readonly recentBotMessageIds = new RecentBotMessageIds();
+	private readonly groupTitleCache = new Map<string, string>();
+	private readonly groupTitleRequests = new Map<string, Promise<string | undefined>>();
+	private groupListRefreshPromise: Promise<void> | undefined;
 
 		constructor(
 			private readonly channel: ChannelSpec,
@@ -473,8 +481,9 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		this.listenersRegistered = true;
 		for (const eventName of NAPCAT_MESSAGE_EVENTS) {
 			this.client.on(eventName, async (message) => {
-				const event = mapNapcatMessageToEvent(message as NapcatMessageEvent, this.selfId);
+				let event = mapNapcatMessageToEvent(message as NapcatMessageEvent, this.selfId);
 				if (event) {
+					event = await this.enrichGroupTitle(event);
 					event.isReplyToBot = this.recentBotMessageIds.isReplyToBot(event.chatId, event.replyToMessageId);
 					await this.callbacks?.onEvent(event);
 				}
@@ -498,6 +507,9 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 			.then(() => {
 				this.clearReconnectTimer();
 				this.reconnectAttempts = 0;
+				if (this.running) {
+					void this.refreshGroupTitlesFromList();
+				}
 				if (this.sawConnectionFailure) {
 					this.sawConnectionFailure = false;
 					this.callbacks?.onHealthy?.();
@@ -520,6 +532,122 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 				}
 			});
 		return this.connectPromise;
+	}
+
+	private async enrichGroupTitle(event: InboundMessageEvent): Promise<InboundMessageEvent> {
+		if (event.chatKind !== "group") {
+			return event;
+		}
+		const title = await this.resolveGroupTitle(event.chatId, event.chatTitle);
+		if (!title || title === event.chatTitle) {
+			return event;
+		}
+		return {
+			...event,
+			chatTitle: title,
+		};
+	}
+
+	private async resolveGroupTitle(chatId: string, knownTitle?: string): Promise<string | undefined> {
+		if (knownTitle?.trim()) {
+			this.noteGroupTitle(chatId, knownTitle);
+			return knownTitle.trim();
+		}
+		const cached = this.groupTitleCache.get(chatId);
+		if (cached) {
+			return cached;
+		}
+		const inFlight = this.groupTitleRequests.get(chatId);
+		if (inFlight) {
+			return inFlight;
+		}
+		const request = this.fetchGroupTitle(chatId).finally(() => {
+			this.groupTitleRequests.delete(chatId);
+		});
+		this.groupTitleRequests.set(chatId, request);
+		return request;
+	}
+
+	private async fetchGroupTitle(chatId: string): Promise<string | undefined> {
+		const groupId = Number.parseInt(chatId, 10);
+		if (!Number.isFinite(groupId)) {
+			return undefined;
+		}
+		try {
+			const info = this.parseGroupInfo(
+				await this.client.CallApi("get_group_info", {
+					group_id: groupId,
+					no_cache: false,
+				}),
+			);
+			if (info) {
+				this.noteGroupTitle(info.chatId, info.title);
+				return info.title;
+			}
+		} catch {
+			// Ignore and fall back to the group list lookup below.
+		}
+		await this.refreshGroupTitlesFromList();
+		return this.groupTitleCache.get(chatId);
+	}
+
+	private async refreshGroupTitlesFromList(): Promise<void> {
+		if (this.groupListRefreshPromise) {
+			return this.groupListRefreshPromise;
+		}
+		this.groupListRefreshPromise = (async () => {
+			try {
+				const groups = this.parseGroupList(await this.client.CallApi("get_group_list", {}));
+				for (const group of groups) {
+					this.noteGroupTitle(group.chatId, group.title, false);
+				}
+				if (groups.length > 0) {
+					this.callbacks?.onGroupTitles?.(groups);
+				}
+			} catch {
+				// A missing or failing list API should not break the polling loop.
+			}
+		})().finally(() => {
+			this.groupListRefreshPromise = undefined;
+		});
+		return this.groupListRefreshPromise;
+	}
+
+	private noteGroupTitle(chatId: string, title: string, emit = true): void {
+		const normalized = title.trim();
+		if (!normalized) {
+			return;
+		}
+		const previous = this.groupTitleCache.get(chatId);
+		this.groupTitleCache.set(chatId, normalized);
+		if (emit && previous !== normalized) {
+			this.callbacks?.onGroupTitles?.([{ chatId, title: normalized }]);
+		}
+	}
+
+	private parseGroupInfo(value: unknown): { chatId: string; title: string } | undefined {
+		if (!value || typeof value !== "object") {
+			return undefined;
+		}
+		const candidate = value as NapcatGroupInfoLike;
+		const title = typeof candidate.group_name === "string" ? candidate.group_name.trim() : "";
+		const chatId =
+			typeof candidate.group_id === "number" || typeof candidate.group_id === "string"
+				? String(candidate.group_id)
+				: "";
+		if (!chatId || !title) {
+			return undefined;
+		}
+		return { chatId, title };
+	}
+
+	private parseGroupList(value: unknown): Array<{ chatId: string; title: string }> {
+		if (!Array.isArray(value)) {
+			return [];
+		}
+		return value
+			.map((entry) => this.parseGroupInfo(entry))
+			.filter((entry): entry is { chatId: string; title: string } => Boolean(entry));
 	}
 
 	private isConnectionOpen(): boolean {
