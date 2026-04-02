@@ -99,22 +99,16 @@ describe("worker append prompt", () => {
 			personaContext: {
 				indexMarkdown: "## 我认识的人\n- 小王：毕业论文相关 → memory/people/telegram-111.md",
 				sceneObservations: "[2026-04-01T00:00:00.000Z] telegram:111 小王: 支付接口又挂了",
-				selectedMemories: [
-					{
-						path: "memory/people/telegram-111.md",
-						content: "小王之前提过毕业论文最近压力很大。",
-					},
-				],
-				selectionNotes: "Loaded the sender's detailed memory and the current scene notes.",
 			},
 		};
 
 		const prompt = buildAppendPrompt(payload, "", "");
-		expect(prompt).toContain("## Persona Selection Notes");
 		expect(prompt).toContain("## Persona Index");
-		expect(prompt).toContain("## Selected Persona Memories");
-		expect(prompt).toContain("memory/people/telegram-111.md");
 		expect(prompt).toContain("## Current Scene Observations");
+		expect(prompt).toContain("use the built-in `read` tool");
+		expect(prompt).toContain("file path referenced in index.md");
+		expect(prompt).not.toContain("## Persona Selection Notes");
+		expect(prompt).not.toContain("## Selected Persona Memories");
 	});
 
 	it("collects hydrated image attachments as multimodal input", () => {

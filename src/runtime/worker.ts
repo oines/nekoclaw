@@ -83,20 +83,9 @@ export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: 
 	].filter(Boolean);
 	const personaSections = payload.personaContext
 		? [
-				payload.personaContext.selectionNotes
-					? `## Persona Selection Notes
-${payload.personaContext.selectionNotes}`
-					: "",
 				payload.personaContext.indexMarkdown
 					? `## Persona Index
 ${payload.personaContext.indexMarkdown}`
-					: "",
-				(payload.personaContext.selectedMemories?.length ?? 0) > 0
-					? `## Selected Persona Memories
-${payload.personaContext.selectedMemories
-	.map((memoryDoc) => `### ${memoryDoc.path}
-${memoryDoc.content}`)
-	.join("\n\n")}`
 					: "",
 				payload.personaContext.sceneObservations
 					? `## Current Scene Observations
@@ -123,8 +112,10 @@ ${payload.personaContext.sceneObservations}`
 - Use \`list_contacts\`, \`list_groups\`, \`get_group_members\`, and \`get_contact_detail\` to inspect the runtime-known directory snapshot.
 - Use the \`no_reply\` tool when the best action is to intentionally stay silent.
 - If Persona memory context is present, treat it as the authoritative memory substrate for people and past events.
-- The persona index is always-on high-level context; selected persona memories are detailed files that were loaded on demand.
+- The persona index is always-on high-level context. If you need detailed memory about a person or scene, use the built-in \`read\` tool to open the specific file path referenced in index.md under \`.nekoclaw-persona/memory/\`.
+- Do not read persona memory files by default. Read them only when the current dialogue genuinely needs detailed background that is not already clear from index.md and the current conversation.
 - Current Scene Observations are recent旁观记录. If you refer to them, make it explicit when you were only observing rather than participating.
+- Current Scene Observations are already injected for you, so you do not need to manually read observations/ files.
 - Preserve uncertainty markers from the evidence ("可能", "应该", etc.) instead of upgrading them into certainty.
 ${hasCurrentImages
 	? `- The current inbound message includes image content. If the user asks what is in the image, answer with direct visual facts first.

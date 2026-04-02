@@ -447,16 +447,9 @@ export interface QueueEvent {
 	error?: string;
 }
 
-export interface PreparedPersonaMemoryDocument {
-	path: string;
-	content: string;
-}
-
 export interface PreparedPersonaContext {
 	indexMarkdown: string;
 	sceneObservations: string;
-	selectedMemories: PreparedPersonaMemoryDocument[];
-	selectionNotes: string;
 }
 
 export interface RuntimeDirectoryContactSnapshot {

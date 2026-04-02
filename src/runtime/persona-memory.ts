@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { complete, type Context } from "@mariozechner/pi-ai";
 import {
 	AuthStorage,
 	createAgentSession,
@@ -25,10 +24,6 @@ import type { AgentSpec, InboundMessageEvent, PreparedPersonaContext, ReplyPaylo
 const INDEX_TOKEN_BUDGET = 2_000;
 const SCENE_OBSERVATION_MAX_LINES = 80;
 const SCENE_OBSERVATION_TOKEN_BUDGET = 1_200;
-const MEMORY_FILE_TOKEN_BUDGET = 1_500;
-const TOTAL_MEMORY_TOKEN_BUDGET = 3_000;
-const MAX_SELECTED_MEMORY_FILES = 3;
-const SELECTOR_TIMEOUT_MS = 20_000;
 const FORMATION_MIN_OBSERVATION_LINES = 50;
 const FORMATION_MAX_WAIT_MS = 30 * 60 * 1_000;
 const FORMATION_MAX_RETRIES = 3;
@@ -36,20 +31,20 @@ const DREAM_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const DREAM_DOC_EXCERPT_TOKEN_BUDGET = 220;
 const DREAM_OBSERVATION_EXCERPT_TOKEN_BUDGET = 180;
 const MAINTENANCE_TIMEOUT_MS = 120_000;
+const MANIFEST_TEXT_MAX_CHARS = 220;
 
 const maintenanceLocks = new Map<string, Promise<void>>();
 const backlogSweepQueued = new Set<string>();
 const dreamQueued = new Set<string>();
 const dreamSkipAuditCache = new Map<string, string>();
 
-interface SelectorResult {
-	paths: string[];
-	notes: string;
-}
-
-interface SelectorAttemptResult {
-	result?: SelectorResult;
-	fallbackReason?: string;
+interface PersonaMemoryManifestEntry {
+	path: string;
+	kind: "people" | "scene";
+	title: string;
+	description: string;
+	bodyContent: string;
+	hasFrontmatter: boolean;
 }
 
 interface FormationRetryState {
@@ -170,26 +165,12 @@ function buildSceneMemoryPath(sceneRef: string): string {
 	return `memory/scenes/${sceneRef}.md`;
 }
 
-function buildAccountMemoryPath(event: InboundMessageEvent): string {
-	const account = `${event.channelType}-${event.sender.externalId ?? event.chatId}`;
-	return `memory/people/${slugSegment(account)}.md`;
-}
-
 function collectReplyText(payload: ReplyPayload | undefined): string {
 	return payload?.text?.trim() || "";
 }
 
 function collectEventText(event: InboundMessageEvent): string {
 	return summarizeBlocks(event.blocks).join("\n").trim();
-}
-
-function extractJsonObject(text: string): string | undefined {
-	const start = text.indexOf("{");
-	const end = text.lastIndexOf("}");
-	if (start === -1 || end === -1 || end <= start) {
-		return undefined;
-	}
-	return text.slice(start, end + 1);
 }
 
 function normalizeText(value: string | undefined): string {
@@ -280,6 +261,111 @@ function safeJoinPersonaPath(personaDir: string, relativePath: string): string {
 	return join(personaDir, relativePath);
 }
 
+function trimManifestText(value: string, maxChars = MANIFEST_TEXT_MAX_CHARS): string {
+	const normalized = value.replace(/\s+/g, " ").trim();
+	if (normalized.length <= maxChars) {
+		return normalized;
+	}
+	return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function extractFrontmatterBlock(content: string): { frontmatter: Record<string, string>; body: string; hasFrontmatter: boolean } {
+	const normalized = content.replace(/\r\n/g, "\n");
+	if (!normalized.startsWith("---\n")) {
+		return { frontmatter: {}, body: content, hasFrontmatter: false };
+	}
+	const lines = normalized.split("\n");
+	let closingIndex = -1;
+	for (let index = 1; index < lines.length; index += 1) {
+		if (lines[index]?.trim() === "---") {
+			closingIndex = index;
+			break;
+		}
+	}
+	if (closingIndex < 1) {
+		return { frontmatter: {}, body: content, hasFrontmatter: false };
+	}
+	const frontmatter: Record<string, string> = {};
+	for (const rawLine of lines.slice(1, closingIndex)) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#")) {
+			continue;
+		}
+		const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+		if (!match?.[1]) {
+			continue;
+		}
+		let value = (match[2] ?? "").trim();
+		const quoted = value.match(/^(['"])(.*)\1$/);
+		if (quoted?.[2] !== undefined) {
+			value = quoted[2];
+		}
+		frontmatter[match[1]] = value;
+	}
+	return {
+		frontmatter,
+		body: lines.slice(closingIndex + 1).join("\n").replace(/^\n+/, ""),
+		hasFrontmatter: true,
+	};
+}
+
+function deriveLegacyTitle(relativePath: string, body: string): string {
+	for (const rawLine of body.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		const heading = line.match(/^#{1,6}\s+(.+)$/);
+		if (heading?.[1]) {
+			return trimManifestText(heading[1], 120);
+		}
+	}
+	return relativePath.split("/").pop()?.replace(/\.md$/i, "") ?? relativePath;
+}
+
+function deriveLegacyDescription(body: string): string {
+	const lines = body
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.match(/^#{1,6}\s+/));
+	if (lines.length === 0) {
+		return "";
+	}
+	const start = lines[0]!.replace(/^[-*]\s+/, "");
+	const continuation = lines.slice(1).find((line) => !line.startsWith("- ") && !line.startsWith("* "));
+	return trimManifestText([start, continuation].filter(Boolean).join(" "));
+}
+
+function parsePersonaMemoryManifestEntry(relativePath: string, rawContent: string): PersonaMemoryManifestEntry {
+	const { frontmatter, body, hasFrontmatter } = extractFrontmatterBlock(rawContent);
+	const bodyContent = body.trim();
+	return {
+		path: relativePath,
+		kind: relativePath.startsWith("memory/people/") ? "people" : "scene",
+		title: trimManifestText(frontmatter.title || deriveLegacyTitle(relativePath, bodyContent), 120),
+		description: trimManifestText(frontmatter.description || deriveLegacyDescription(bodyContent)),
+		bodyContent,
+		hasFrontmatter,
+	};
+}
+
+function escapeFrontmatterValue(value: string): string {
+	return JSON.stringify(value);
+}
+
+function ensureCanonicalPersonaMemoryContent(relativePath: string, rawContent: string): string {
+	const entry = parsePersonaMemoryManifestEntry(relativePath, rawContent);
+	if (entry.hasFrontmatter) {
+		return rawContent;
+	}
+	const body = entry.bodyContent || rawContent.trim();
+	return [
+		"---",
+		`title: ${escapeFrontmatterValue(entry.title)}`,
+		`description: ${escapeFrontmatterValue(entry.description)}`,
+		"---",
+		"",
+		body,
+	].join("\n").trimEnd() + "\n";
+}
+
 function formatObservationLine(event: InboundMessageEvent): string {
 	const speaker = `${event.channelType}:${event.sender.externalId ?? event.chatId}`;
 	const displayName = event.sender.displayName ? ` ${event.sender.displayName}` : "";
@@ -314,51 +400,8 @@ function buildObservationSignature(observationLines: string[]): string {
 	return createHash("sha256").update(observationLines.join("\n")).digest("hex");
 }
 
-function fallbackSelector(
-	indexMarkdown: string,
-	sceneObservations: string,
-	currentMessage: string,
-	candidateContents: Array<{ path: string; content: string }>,
-): SelectorResult {
-	const haystack = `${indexMarkdown}\n${sceneObservations}\n${currentMessage}`.toLowerCase();
-	const scored = candidateContents
-		.map((candidate) => {
-			const basename = candidate.path.split("/").pop()?.replace(/\.md$/i, "") ?? candidate.path;
-			let score = 0;
-			for (const token of Array.from(new Set(haystack.split(/[^a-z0-9\u4e00-\u9fff]+/i).filter((value) => value.length >= 2)))) {
-				if (candidate.content.toLowerCase().includes(token)) {
-					score += 2;
-				}
-				if (basename.toLowerCase().includes(token)) {
-					score += 3;
-				}
-			}
-			return { path: candidate.path, score };
-		})
-		.filter((candidate) => candidate.score > 0)
-		.sort((left, right) => right.score - left.score)
-		.slice(0, MAX_SELECTED_MEMORY_FILES);
-	return {
-		paths: scored.map((entry) => entry.path),
-		notes: scored.length > 0 ? "Used heuristic selector fallback." : "No detailed memory files selected.",
-	};
-}
-
 function buildDreamSkipKey(reason: string, details: Record<string, unknown>): string {
 	return JSON.stringify({ reason, ...details });
-}
-
-async function extractCompletionText(
-	model: NonNullable<ReturnType<ModelRegistry["find"]>>,
-	apiKey: string | undefined,
-	context: Context,
-): Promise<string> {
-	const response = await complete(model, context, apiKey ? { apiKey } : undefined);
-	return response.content
-		.filter((block): block is Extract<(typeof response.content)[number], { type: "text" }> => block.type === "text")
-		.map((block) => block.text)
-		.join("\n")
-		.trim();
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -377,13 +420,6 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 				reject(error);
 			});
 	});
-}
-
-class SelectorTimeoutError extends Error {
-	constructor() {
-		super(`Selector timed out after ${SELECTOR_TIMEOUT_MS}ms.`);
-		this.name = "SelectorTimeoutError";
-	}
 }
 
 export class PersonaMemoryService {
@@ -405,69 +441,18 @@ export class PersonaMemoryService {
 		agent: AgentSpec,
 		session: SessionRecord,
 		event: InboundMessageEvent,
-		effectiveModel?: WorkerPayload["effectiveModel"],
 	): Promise<PreparedPersonaContext> {
 		this.ensurePersonaLayout(agent.slug);
-		const personaDir = this.store.getPersonaDir(agent.slug);
 		const sceneRef = buildSceneRef(session, event);
 		const indexMarkdown = trimToTokenBudget(
 			readTextFile(this.store.getPersonaIndexPath(agent.slug), ""),
 			INDEX_TOKEN_BUDGET,
 		);
 		const sceneObservations = this.readSceneObservations(agent.slug, sceneRef);
-		const candidatePaths = [
-			...listMarkdownFiles(this.store.getPersonaPeopleDir(agent.slug), personaDir),
-			...listMarkdownFiles(this.store.getPersonaScenesDir(agent.slug), personaDir),
-		];
-		const candidateContents = candidatePaths.map((path) => ({
-			path,
-			content: readTextFile(safeJoinPersonaPath(personaDir, path), ""),
-		}));
-		const selectorAttempt = await this.runSelector(agent, effectiveModel, {
-			indexMarkdown,
-			sceneObservations,
-			currentMessage: collectEventText(event),
-			candidatePaths,
-			candidateContents,
-			sessionKey: session.sessionKey,
-			sceneRef,
-		});
-		const selector =
-			selectorAttempt.result ?? fallbackSelector(indexMarkdown, sceneObservations, collectEventText(event), candidateContents);
-		if (!selectorAttempt.result) {
-			this.store.audit(agent.agentId, "persona.selector_fallback_used", {
-				sessionKey: session.sessionKey,
-				sceneRef,
-				candidateCount: candidatePaths.length,
-				selectedCount: selector.paths.length,
-				reason: selectorAttempt.fallbackReason ?? "unknown",
-			});
-		}
-
-		const selectedMemories: PreparedPersonaContext["selectedMemories"] = [];
-		let usedBudget = 0;
-		for (const path of selector.paths) {
-			const match = candidateContents.find((candidate) => candidate.path === path);
-			if (!match) {
-				continue;
-			}
-			const trimmed = trimToTokenBudget(match.content, MEMORY_FILE_TOKEN_BUDGET);
-			const cost = estimateTokens(trimmed);
-			if (!trimmed || usedBudget + cost > TOTAL_MEMORY_TOKEN_BUDGET) {
-				continue;
-			}
-			selectedMemories.push({ path, content: trimmed });
-			usedBudget += cost;
-			if (selectedMemories.length >= MAX_SELECTED_MEMORY_FILES) {
-				break;
-			}
-		}
 
 		return {
 			indexMarkdown,
 			sceneObservations,
-			selectedMemories,
-			selectionNotes: selector.notes,
 		};
 	}
 
@@ -611,145 +596,6 @@ export class PersonaMemoryService {
 		writeJsonFile(this.store.getPersonaDreamStatePath(slug), state);
 	}
 
-	private async runSelector(
-		agent: AgentSpec,
-		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
-		input: {
-			indexMarkdown: string;
-			sceneObservations: string;
-			currentMessage: string;
-			candidatePaths: string[];
-			candidateContents: Array<{ path: string; content: string }>;
-			sessionKey: string;
-			sceneRef: string;
-		},
-	): Promise<SelectorAttemptResult> {
-		if (input.candidatePaths.length === 0) {
-			return {
-				result: {
-					paths: [],
-					notes: "No detailed memory files available yet.",
-				},
-			};
-		}
-		const modelConfig = this.resolveModel(agent, effectiveModel);
-		if (!modelConfig) {
-			return { fallbackReason: "model_unavailable" };
-		}
-		const startedAt = Date.now();
-		this.store.audit(agent.agentId, "persona.selector_started", {
-			sessionKey: input.sessionKey,
-			sceneRef: input.sceneRef,
-			candidateCount: input.candidatePaths.length,
-		});
-		const context: Context = {
-			systemPrompt: [
-				"你是 Nekoclaw 的人物记忆正文选择器。",
-				"你的任务是根据 index、当前消息、当前场景旁观记录，决定是否需要读取哪些详细记忆正文文件。",
-				"index.md 永远常驻，所以除非真的需要细节，否则不要选正文。",
-				`最多选择 ${MAX_SELECTED_MEMORY_FILES} 个文件，只能从给定候选路径中选。`,
-				"如果不需要正文，返回空数组。",
-				"输出必须是 JSON：{\"paths\":[...],\"notes\":\"...\"}。",
-			].join("\n"),
-			messages: [
-				{
-					role: "user",
-					content: [
-						`当前消息：\n${input.currentMessage || "(empty)"}`,
-						`index.md：\n${input.indexMarkdown || "(empty)"}`,
-						`当前场景 observations：\n${input.sceneObservations || "(empty)"}`,
-						`可选正文路径：\n${input.candidatePaths.map((path) => `- ${path}`).join("\n")}`,
-					].join("\n\n"),
-					timestamp: Date.now(),
-				},
-			],
-		};
-		try {
-			const raw = await new Promise<string>((resolve, reject) => {
-				const timeout = setTimeout(() => {
-					reject(new SelectorTimeoutError());
-				}, SELECTOR_TIMEOUT_MS);
-				timeout.unref?.();
-				void extractCompletionText(modelConfig.model, modelConfig.apiKey, context)
-					.then((value) => {
-						clearTimeout(timeout);
-						resolve(value);
-					})
-					.catch((error) => {
-						clearTimeout(timeout);
-						reject(error);
-					});
-			});
-			const json = extractJsonObject(raw);
-			if (!json) {
-				const durationMs = Date.now() - startedAt;
-				this.store.audit(agent.agentId, "persona.selector_failed", {
-					sessionKey: input.sessionKey,
-					sceneRef: input.sceneRef,
-					candidateCount: input.candidatePaths.length,
-					durationMs,
-					reason: "missing_json",
-				});
-				return { fallbackReason: "missing_json" };
-			}
-			let parsed: Partial<SelectorResult>;
-			try {
-				parsed = JSON.parse(json) as Partial<SelectorResult>;
-			} catch (error) {
-				const durationMs = Date.now() - startedAt;
-				this.store.audit(agent.agentId, "persona.selector_failed", {
-					sessionKey: input.sessionKey,
-					sceneRef: input.sceneRef,
-					candidateCount: input.candidatePaths.length,
-					durationMs,
-					reason: "invalid_json",
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return { fallbackReason: "invalid_json" };
-			}
-			const allowed = new Set(input.candidatePaths);
-			const paths = (parsed.paths ?? [])
-				.filter((path): path is string => typeof path === "string")
-				.filter((path) => allowed.has(path))
-				.slice(0, MAX_SELECTED_MEMORY_FILES);
-			const durationMs = Date.now() - startedAt;
-			this.store.audit(agent.agentId, "persona.selector_completed", {
-				sessionKey: input.sessionKey,
-				sceneRef: input.sceneRef,
-				candidateCount: input.candidatePaths.length,
-				selectedCount: paths.length,
-				durationMs,
-			});
-			return {
-				result: {
-					paths,
-					notes: normalizeText(parsed.notes) || "Selected detailed memories using the model.",
-				},
-			};
-		} catch (error) {
-			const durationMs = Date.now() - startedAt;
-			if (error instanceof SelectorTimeoutError) {
-				this.store.audit(agent.agentId, "persona.selector_timed_out", {
-					sessionKey: input.sessionKey,
-					sceneRef: input.sceneRef,
-					candidateCount: input.candidatePaths.length,
-					durationMs,
-					reason: "timeout",
-				});
-				return { fallbackReason: "timeout" };
-			}
-			this.store.audit(agent.agentId, "persona.selector_failed", {
-				sessionKey: input.sessionKey,
-				sceneRef: input.sceneRef,
-				candidateCount: input.candidatePaths.length,
-				durationMs,
-				reason: "model_error",
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return { fallbackReason: "model_error" };
-		}
-	}
-
 	private buildDreamCorpusSnapshot(slug: string): DreamCorpusSnapshot {
 		this.ensurePersonaLayout(slug);
 		const personaDir = this.store.getPersonaDir(slug);
@@ -847,7 +693,11 @@ export class PersonaMemoryService {
 			if (!existsSync(tempPath)) {
 				continue;
 			}
-			writeTextFile(safeJoinPersonaPath(livePersonaDir, relativePath), readTextFile(tempPath, ""));
+			const rawContent = readTextFile(tempPath, "");
+			const nextContent = isAllowedMemoryPath(relativePath)
+				? ensureCanonicalPersonaMemoryContent(relativePath, rawContent)
+				: rawContent;
+			writeTextFile(safeJoinPersonaPath(livePersonaDir, relativePath), nextContent);
 		}
 		if (!options.allowDeletes) {
 			return;
@@ -900,7 +750,9 @@ export class PersonaMemoryService {
 					: "You are Nekoclaw formation, a scene-local persona memory maintainer.",
 				"You are working inside a temporary clone of .nekoclaw-persona.",
 				"Use read/edit/write tools to maintain index.md and memory markdown files directly.",
+				"People and scene memory files must use YAML frontmatter with title and description, followed by natural-language Markdown body text.",
 				"Existing files must be revised with edit. Use write only to create a new memory/people or memory/scenes file that does not exist yet.",
+				"Preserve existing frontmatter when it is still correct, revise description when the body meaning changes, and add frontmatter when editing a legacy file without it.",
 				input.mode === "dream"
 					? "Dream may delete low-value memory/people or memory/scenes files when forgetting is appropriate, but it must preserve corrections, confirmed identity links, core relationships, and long-term background."
 					: "Formation must not delete any files.",
@@ -1090,7 +942,6 @@ export class PersonaMemoryService {
 						"Required files to inspect:",
 						"- index.md",
 						`- observations/${sceneRef}.log`,
-						...input.personaContext.selectedMemories.map((doc) => `- ${doc.path}`),
 						`- ${buildSceneMemoryPath(sceneRef)} (if it exists)`,
 						"",
 						`Current inbound message:\n${collectEventText(input.event) || "(empty)"}`,
@@ -1101,6 +952,8 @@ export class PersonaMemoryService {
 						"- Preserve persona memory as Markdown prose.",
 						"- Update index.md and any relevant people/scenes files using edit.",
 						"- You may create a new people/scenes file with write if needed.",
+						"- Ensure every people/scenes file you touch has YAML frontmatter with stable title and a concise description for recall.",
+						"- Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
 						"- Do not delete files.",
 						"- Preserve corrections, identity links, uncertainty, and whether you observed or participated.",
 						"- When you finish, call persona_finalize with the number of observation lines from this scene log that were fully incorporated.",
@@ -1174,8 +1027,10 @@ export class PersonaMemoryService {
 						"Dream goals:",
 						"- Cross-scene linking for the same person.",
 						"- Rebuild index.md as a globally consistent snapshot.",
+						"- Keep every person and scene entry in index.md path-bearing so the worker can read detailed files directly.",
 						"- Compress stale low-value memories while preserving core identity and correction details.",
 						"- Create missing people files when repeated mentions across scenes justify it.",
+						"- Ensure every people/scenes file you keep or create has YAML frontmatter with title and a concise description for recall.",
 						"- You may delete low-value people/scenes files if forgetting them is appropriate, but only after updating index.md so references stay consistent.",
 						"- Never invent facts and never modify observations directly.",
 						"",
@@ -1250,9 +1105,11 @@ export class PersonaMemoryService {
 						prompt: [
 							`Maintain persona memory for scene ${sceneRef} from backlog observations.`,
 							"",
-							"Inspect index.md, the scene observation log, and any relevant memory files you need.",
-							"Revise existing files with edit, create new people/scenes files with write when necessary, and do not delete files.",
-							"Preserve corrections, identity links, uncertainty, and whether the bot was only observing.",
+						"Inspect index.md, the scene observation log, and any relevant memory files you need.",
+						"Revise existing files with edit, create new people/scenes files with write when necessary, and do not delete files.",
+						"Any people/scenes file you touch should end with YAML frontmatter plus natural-language Markdown body.",
+						"Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
+						"Preserve corrections, identity links, uncertainty, and whether the bot was only observing.",
 							`Primary observation file: observations/${sceneRef}.log`,
 							"When finished, call persona_finalize with how many observation lines were fully incorporated.",
 						].join("\n"),

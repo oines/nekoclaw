@@ -56,7 +56,7 @@ export class WorkerRunnerService {
 		const effectiveModel = this.resolveEffectiveModel(agent, session, job);
 		await this.ensureContainer(agent.agentId);
 		const plugin = this.channelPlugins.get(getRuntimeKey(agent.agentId, session.channelType));
-		const personaContext = await this.personaMemory.buildPreparedContext(agent, session, job.event, effectiveModel);
+		const personaContext = await this.personaMemory.buildPreparedContext(agent, session, job.event);
 		const runtimeDirectory = this.runtimeDirectory.buildSnapshot(agent, session, job.event);
 		const payload: WorkerPayload = {
 			agent,
