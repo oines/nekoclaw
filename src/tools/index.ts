@@ -1,6 +1,13 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { codingTools, type ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { parseTargetRef } from "../runtime/runtime-directory.js";
+import {
+	SESSION_COMPACTION_SETTINGS,
+	SESSION_PRUNING_ENABLED,
+	SESSION_PRUNING_OVERSIZED_RESULT_CHARS,
+	SESSION_PRUNING_PROTECTED_ASSISTANT_MESSAGES,
+	SESSION_PRUNING_TOOL_RESULT_BUDGET_CHARS,
+} from "../runtime/session-hygiene.js";
 import type { ChannelToolContext, OutboundAttachment } from "../types.js";
 
 const AttachmentSchema = Type.Object({
@@ -324,8 +331,19 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 					capabilities: context.capabilities,
 					inboundMessageId: context.event.messageId,
 					replyToMessageId: context.event.replyToMessageId,
-				availableChannels: context.runtimeDirectory.availableChannels,
-			};
+					availableChannels: context.runtimeDirectory.availableChannels,
+					compaction: {
+						enabled: Boolean(SESSION_COMPACTION_SETTINGS.enabled),
+						reserveTokens: SESSION_COMPACTION_SETTINGS.reserveTokens,
+						keepRecentTokens: SESSION_COMPACTION_SETTINGS.keepRecentTokens,
+					},
+					pruning: {
+						enabled: SESSION_PRUNING_ENABLED,
+						protectedRecentAssistantMessages: SESSION_PRUNING_PROTECTED_ASSISTANT_MESSAGES,
+						oversizedThresholdChars: SESSION_PRUNING_OVERSIZED_RESULT_CHARS,
+						toolResultBudgetChars: SESSION_PRUNING_TOOL_RESULT_BUDGET_CHARS,
+					},
+				};
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
 				details: summary,

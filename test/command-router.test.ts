@@ -34,6 +34,14 @@ describe("runtime command router", () => {
 			externalConversationId: "123",
 			chatKind: "dm",
 		});
+		writeFileSync(
+			store.getSessionContextPath(agent.slug, session.sessionRecordId),
+			[
+				JSON.stringify({ type: "session_info", id: "1" }),
+				JSON.stringify({ type: "compaction", id: "2", summary: "summary", firstKeptEntryId: "1", tokensBefore: 100 }),
+			].join("\n"),
+			"utf-8",
+		);
 		const reply = vi.fn(async () => []);
 		const router = new CommandRouterService(store, () => ({ queued: 2, processing: true, currentJobId: "job-1" }));
 
@@ -61,6 +69,12 @@ describe("runtime command router", () => {
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Session key: ${session.sessionKey}`);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction: enabled=yes");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction reserveTokens: 20000");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction keepRecentTokens: 20000");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Context file size:");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compactions: 1");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Pruning: enabled");
 	}, 10_000);
 
 	it("returns status for a command with leading whitespace representing stripped map mentions", async () => {

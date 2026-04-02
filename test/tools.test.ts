@@ -202,6 +202,26 @@ describe("tool composition", () => {
 		expect(contactResult?.details).toEqual(runtimeDirectory.contacts[0]);
 	});
 
+	it("reports session hygiene defaults in session_status", async () => {
+		const composition = createContext({ chatKind: "group" });
+		const statusTool = composition.customTools.find((tool) => tool.name === "session_status");
+
+		const result = await statusTool?.execute("tool-status", {}, undefined, undefined, undefined as never);
+		const summary = result?.details as Record<string, unknown>;
+
+		expect(summary.compaction).toEqual({
+			enabled: true,
+			reserveTokens: 20_000,
+			keepRecentTokens: 20_000,
+		});
+		expect(summary.pruning).toEqual({
+			enabled: true,
+			protectedRecentAssistantMessages: 3,
+			oversizedThresholdChars: 8_000,
+			toolResultBudgetChars: 12_000,
+		});
+	});
+
 	it("records a targeted proactive message separately from current-session message actions", async () => {
 		const actions: ChannelToolAction[] = [];
 		const composition = createContext({ actions, chatKind: "group" });

@@ -15,6 +15,7 @@ const SCENE_OBSERVATION_TOKEN_BUDGET = 1_200;
 const MEMORY_FILE_TOKEN_BUDGET = 1_500;
 const TOTAL_MEMORY_TOKEN_BUDGET = 3_000;
 const MAX_SELECTED_MEMORY_FILES = 3;
+const SELECTOR_TIMEOUT_MS = 20_000;
 const FORMATION_MIN_OBSERVATION_LINES = 50;
 const FORMATION_MAX_WAIT_MS = 30 * 60 * 1_000;
 const FORMATION_MAX_RETRIES = 3;
@@ -32,6 +33,11 @@ const dreamSkipAuditCache = new Map<string, string>();
 interface SelectorResult {
 	paths: string[];
 	notes: string;
+}
+
+interface SelectorAttemptResult {
+	result?: SelectorResult;
+	fallbackReason?: string;
 }
 
 interface FormationWrite {
@@ -354,6 +360,13 @@ async function extractCompletionText(
 		.trim();
 }
 
+class SelectorTimeoutError extends Error {
+	constructor() {
+		super(`Selector timed out after ${SELECTOR_TIMEOUT_MS}ms.`);
+		this.name = "SelectorTimeoutError";
+	}
+}
+
 export class PersonaMemoryService {
 	constructor(private readonly store: JsonNekoclawStore) {}
 
@@ -391,13 +404,26 @@ export class PersonaMemoryService {
 			path,
 			content: readTextFile(safeJoinPersonaPath(personaDir, path), ""),
 		}));
-		const selector = (await this.runSelector(agent, effectiveModel, {
+		const selectorAttempt = await this.runSelector(agent, effectiveModel, {
 			indexMarkdown,
 			sceneObservations,
 			currentMessage: collectEventText(event),
 			candidatePaths,
 			candidateContents,
-		})) ?? fallbackSelector(indexMarkdown, sceneObservations, collectEventText(event), candidateContents);
+			sessionKey: session.sessionKey,
+			sceneRef,
+		});
+		const selector =
+			selectorAttempt.result ?? fallbackSelector(indexMarkdown, sceneObservations, collectEventText(event), candidateContents);
+		if (!selectorAttempt.result) {
+			this.store.audit(agent.agentId, "persona.selector_fallback_used", {
+				sessionKey: session.sessionKey,
+				sceneRef,
+				candidateCount: candidatePaths.length,
+				selectedCount: selector.paths.length,
+				reason: selectorAttempt.fallbackReason ?? "unknown",
+			});
+		}
 
 		const selectedMemories: PreparedPersonaContext["selectedMemories"] = [];
 		let usedBudget = 0;
@@ -575,18 +601,28 @@ export class PersonaMemoryService {
 			currentMessage: string;
 			candidatePaths: string[];
 			candidateContents: Array<{ path: string; content: string }>;
+			sessionKey: string;
+			sceneRef: string;
 		},
-	): Promise<SelectorResult | undefined> {
+	): Promise<SelectorAttemptResult> {
 		if (input.candidatePaths.length === 0) {
 			return {
-				paths: [],
-				notes: "No detailed memory files available yet.",
+				result: {
+					paths: [],
+					notes: "No detailed memory files available yet.",
+				},
 			};
 		}
 		const modelConfig = this.resolveModel(agent, effectiveModel);
 		if (!modelConfig) {
-			return undefined;
+			return { fallbackReason: "model_unavailable" };
 		}
+		const startedAt = Date.now();
+		this.store.audit(agent.agentId, "persona.selector_started", {
+			sessionKey: input.sessionKey,
+			sceneRef: input.sceneRef,
+			candidateCount: input.candidatePaths.length,
+		});
 		const context: Context = {
 			systemPrompt: [
 				"你是 Nekoclaw 的人物记忆正文选择器。",
@@ -610,25 +646,90 @@ export class PersonaMemoryService {
 			],
 		};
 		try {
-			const raw = await extractCompletionText(modelConfig.model, modelConfig.apiKey, context);
+			const raw = await new Promise<string>((resolve, reject) => {
+				const timeout = setTimeout(() => {
+					reject(new SelectorTimeoutError());
+				}, SELECTOR_TIMEOUT_MS);
+				timeout.unref?.();
+				void extractCompletionText(modelConfig.model, modelConfig.apiKey, context)
+					.then((value) => {
+						clearTimeout(timeout);
+						resolve(value);
+					})
+					.catch((error) => {
+						clearTimeout(timeout);
+						reject(error);
+					});
+			});
 			const json = extractJsonObject(raw);
 			if (!json) {
-				return undefined;
+				const durationMs = Date.now() - startedAt;
+				this.store.audit(agent.agentId, "persona.selector_failed", {
+					sessionKey: input.sessionKey,
+					sceneRef: input.sceneRef,
+					candidateCount: input.candidatePaths.length,
+					durationMs,
+					reason: "missing_json",
+				});
+				return { fallbackReason: "missing_json" };
 			}
-			const parsed = JSON.parse(json) as Partial<SelectorResult>;
+			let parsed: Partial<SelectorResult>;
+			try {
+				parsed = JSON.parse(json) as Partial<SelectorResult>;
+			} catch (error) {
+				const durationMs = Date.now() - startedAt;
+				this.store.audit(agent.agentId, "persona.selector_failed", {
+					sessionKey: input.sessionKey,
+					sceneRef: input.sceneRef,
+					candidateCount: input.candidatePaths.length,
+					durationMs,
+					reason: "invalid_json",
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return { fallbackReason: "invalid_json" };
+			}
 			const allowed = new Set(input.candidatePaths);
 			const paths = (parsed.paths ?? [])
 				.filter((path): path is string => typeof path === "string")
 				.filter((path) => allowed.has(path))
 				.slice(0, MAX_SELECTED_MEMORY_FILES);
+			const durationMs = Date.now() - startedAt;
+			this.store.audit(agent.agentId, "persona.selector_completed", {
+				sessionKey: input.sessionKey,
+				sceneRef: input.sceneRef,
+				candidateCount: input.candidatePaths.length,
+				selectedCount: paths.length,
+				durationMs,
+			});
 			return {
-				paths,
-				notes: normalizeText(parsed.notes) || "Selected detailed memories using the model.",
+				result: {
+					paths,
+					notes: normalizeText(parsed.notes) || "Selected detailed memories using the model.",
+				},
 			};
-			} catch {
-				return undefined;
+		} catch (error) {
+			const durationMs = Date.now() - startedAt;
+			if (error instanceof SelectorTimeoutError) {
+				this.store.audit(agent.agentId, "persona.selector_timed_out", {
+					sessionKey: input.sessionKey,
+					sceneRef: input.sceneRef,
+					candidateCount: input.candidatePaths.length,
+					durationMs,
+					reason: "timeout",
+				});
+				return { fallbackReason: "timeout" };
 			}
+			this.store.audit(agent.agentId, "persona.selector_failed", {
+				sessionKey: input.sessionKey,
+				sceneRef: input.sceneRef,
+				candidateCount: input.candidatePaths.length,
+				durationMs,
+				reason: "model_error",
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return { fallbackReason: "model_error" };
 		}
+	}
 
 	private buildDreamCorpusSnapshot(slug: string): DreamCorpusSnapshot {
 		this.ensurePersonaLayout(slug);

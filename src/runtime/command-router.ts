@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { SESSION_COMPACTION_SETTINGS, SESSION_PRUNING_ENABLED } from "./session-hygiene.js";
 import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { parseAddressedSlashCommand } from "../command-parsing.js";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
@@ -230,6 +232,7 @@ export class CommandRouterService {
 			: agent.provider && agent.modelId
 				? `${agent.provider}/${agent.modelId}`
 				: "none";
+		const hygiene = this.getSessionHygiene(agent, session);
 		return [
 			`Agent: ${agent.slug}`,
 			`Role: ${isAdmin ? "admin" : "user"}`,
@@ -238,7 +241,55 @@ export class CommandRouterService {
 			`Channel trigger: ${this.getChannelGroupTrigger(agent, event.channelType)}`,
 			`Session key: ${session?.sessionKey ?? "none"}`,
 			`Queue: queued=${queue.queued}, processing=${queue.processing ? "yes" : "no"}, current=${queue.currentJobId ?? "none"}`,
+			`Compaction: enabled=${SESSION_COMPACTION_SETTINGS.enabled ? "yes" : "no"}`,
+			`Compaction reserveTokens: ${SESSION_COMPACTION_SETTINGS.reserveTokens}`,
+			`Compaction keepRecentTokens: ${SESSION_COMPACTION_SETTINGS.keepRecentTokens}`,
+			`Context file size: ${hygiene.contextFileSize}`,
+			`Compactions: ${hygiene.compactions}`,
+			`Pruning: ${SESSION_PRUNING_ENABLED ? "enabled" : "disabled"}`,
 		].join("\n");
+	}
+
+	private getSessionHygiene(
+		agent: AgentSpec,
+		session: SessionRecord | undefined,
+	): { contextFileSize: string; compactions: string } {
+		if (!session) {
+			return {
+				contextFileSize: "none",
+				compactions: "unknown",
+			};
+		}
+		const contextPath = this.store.getSessionContextPath(agent.slug, session.sessionRecordId);
+		if (!existsSync(contextPath)) {
+			return {
+				contextFileSize: "0 bytes",
+				compactions: "0",
+			};
+		}
+		const sizeBytes = statSync(contextPath).size;
+		try {
+			const lines = readFileSync(contextPath, "utf-8")
+				.split(/\r?\n/)
+				.filter((line) => line.trim().length > 0);
+			const compactions = lines.reduce((total, line) => {
+				try {
+					const parsed = JSON.parse(line) as { type?: string };
+					return total + (parsed.type === "compaction" ? 1 : 0);
+				} catch {
+					return total;
+				}
+			}, 0);
+			return {
+				contextFileSize: `${sizeBytes} bytes`,
+				compactions: String(compactions),
+			};
+		} catch {
+			return {
+				contextFileSize: `${sizeBytes} bytes`,
+				compactions: "unknown",
+			};
+		}
 	}
 
 	private buildHelpText(isAdmin: boolean): string {

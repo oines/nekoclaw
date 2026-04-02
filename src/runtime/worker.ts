@@ -9,11 +9,12 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@mariozechner/pi-coding-agent";
-import type { AssistantMessage, ImageContent, UserMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, UserMessage } from "@mariozechner/pi-ai";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import { summarizeBlocks } from "../messages.js";
 import type { RuntimeModelsConfig } from "../model/model-types.js";
 import { resolveRuntimeModelInput } from "../model/runtime-model-metadata.js";
+import { SESSION_COMPACTION_SETTINGS, shapeSessionMessagesForPrompt } from "./session-hygiene.js";
 import { readTextFile } from "../store/fs.js";
 import { createToolComposition } from "../tools/index.js";
 import type { ChannelToolAction, WorkerPayload, WorkerResult } from "../types.js";
@@ -241,7 +242,9 @@ function augmentModelInputFromRuntimeConfig(
 
 export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	const runtimeAgentDir = join(WORKSPACE_DIR, ".nekoclaw-runtime");
-	const settingsManager = SettingsManager.inMemory();
+	const settingsManager = SettingsManager.inMemory({
+		compaction: SESSION_COMPACTION_SETTINGS,
+	});
 	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = new ModelRegistry(authStorage, join(runtimeAgentDir, "models.json"));
 	const soul = readTextFile(join(WORKSPACE_DIR, "SOUL.md"), "");
@@ -307,6 +310,8 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	const recentMessages = (session.state.messages || []) as (UserMessage | AssistantMessage)[];
 	const images = collectPromptImages(payload, WORKSPACE_DIR, recentMessages);
 	const hasFiles = payload.job.event.blocks.some((block) => block.kind === "file" && block.attachment?.relativePath);
+	const shapedMessages = shapeSessionMessagesForPrompt((session.state.messages || []) as Message[]);
+	(session.state as { messages: Message[] }).messages = shapedMessages;
 
 	let finalUserPrompt = buildPrompt(payload, images.length > 0, hasFiles);
 	if (images.length > 0) {
