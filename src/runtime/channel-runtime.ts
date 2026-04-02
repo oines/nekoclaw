@@ -43,18 +43,24 @@ export class ChannelRuntimeService {
 				try {
 					this.channelPlugins.set(key, plugin);
 					this.runtimeEntries.set(key, { plugin, fingerprint });
-					plugin.startPolling({
-						onEvent: async (event) => {
-							await this.onEvent(agent.agentId, channel.type, event);
-						},
-						onError: (error) => {
+						plugin.startPolling({
+							onEvent: async (event) => {
+								await this.onEvent(agent.agentId, channel.type, event);
+							},
+							onError: (error) => {
 							this.store.updateAgent(agent.agentId, { lastError: error.message });
-							this.store.audit(agent.agentId, `${channel.type}.poll_error`, {
-								channel: channel.type,
-								error: error.message,
-							});
-						},
-					});
+								this.store.audit(agent.agentId, `${channel.type}.poll_error`, {
+									channel: channel.type,
+									error: error.message,
+								});
+							},
+							onHealthy: () => {
+								this.store.updateAgent(agent.agentId, { lastError: null });
+								this.store.audit(agent.agentId, `${channel.type}.poll_recovered`, {
+									channel: channel.type,
+								});
+							},
+						});
 					this.store.updateAgent(agent.agentId, { lastError: null });
 				} catch (error) {
 					plugin.stop();

@@ -65,6 +65,14 @@ export class StorePaths {
 		return join(this.getPersonaObservationsDir(slug), `${sceneRef}.log`);
 	}
 
+	getPersonaControlDir(slug: string): string {
+		return join(this.getPersonaDir(slug), "control");
+	}
+
+	getPersonaDreamStatePath(slug: string): string {
+		return join(this.getPersonaControlDir(slug), "dream.json");
+	}
+
 	getSessionDir(slug: string, sessionRecordId: string): string {
 		return join(this.getWorkspaceRoot(slug), "chats", sessionRecordId);
 	}

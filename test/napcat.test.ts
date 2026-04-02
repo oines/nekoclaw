@@ -12,6 +12,7 @@ const clientMocks = vi.hoisted(() => {
 		connected = false;
 		started = false;
 		startCalls = 0;
+		startFailures: Error[] = [];
 		connection: { readyState: number } | undefined;
 		callApi = vi.fn(async (action: string, params: Record<string, unknown>) => {
 			if (action === "send_private_msg") {
@@ -45,13 +46,19 @@ const clientMocks = vi.hoisted(() => {
 			this.connected = true;
 			this.connection = { readyState: 1 };
 		}
-		async Start(): Promise<this> {
-			this.startCalls += 1;
-			this.started = true;
-			this.connected = true;
-			this.connection = { readyState: 1 };
-			return this;
-		}
+			async Start(): Promise<this> {
+				this.startCalls += 1;
+				const failure = this.startFailures.shift();
+				if (failure) {
+					this.connected = false;
+					this.connection = undefined;
+					throw failure;
+				}
+				this.started = true;
+				this.connected = true;
+				this.connection = { readyState: 1 };
+				return this;
+			}
 		Disconnect(): void {
 			this.connected = false;
 			this.connection = undefined;
@@ -107,6 +114,28 @@ const dmSession: SessionRecord = {
 	createdAt: "2026-03-29T00:00:00.000Z",
 	updatedAt: "2026-03-29T00:00:00.000Z",
 };
+
+async function createTestPlugin(options?: {
+	config?: Partial<{ wsUrl: string; accessToken?: string; selfId: string }>;
+	groupTrigger?: "all" | "mention";
+	sendDelayMs?: () => number;
+}) {
+	const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
+	return createNapcatChannelPlugin(
+		channel,
+		{
+			wsUrl: "ws://127.0.0.1:3001",
+			accessToken: "token",
+			selfId: "999",
+			...options?.config,
+		},
+		undefined,
+		options?.groupTrigger,
+		{
+			sendDelayMs: options?.sendDelayMs ?? (() => 0),
+		},
+	);
+}
 
 describe("napcat channel plugin", () => {
 	beforeEach(() => {
@@ -179,8 +208,8 @@ describe("napcat channel plugin", () => {
 		});
 	});
 
-	it("captures at-mentions for mention-only group triggering", async () => {
-		const { mapNapcatMessageToEvent, createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
+		it("captures at-mentions for mention-only group triggering", async () => {
+			const { mapNapcatMessageToEvent } = await import("../src/channels/napcat.js");
 		const event = mapNapcatMessageToEvent(
 			{
 				post_type: "message",
@@ -211,15 +240,10 @@ describe("napcat channel plugin", () => {
 			},
 			"999",
 		);
-		const plugin = createNapcatChannelPlugin(
-			channel,
-			{
-				wsUrl: "ws://127.0.0.1:3001",
-				selfId: "999",
-			},
-			undefined,
-			"mention",
-		);
+			const plugin = await createTestPlugin({
+				config: { accessToken: undefined },
+				groupTrigger: "mention",
+			});
 
 		expect(event?.mentionedUserIds).toEqual(["999"]);
 		expect(plugin.triggering.shouldProcessEvent(event!)).toBe(true);
@@ -231,17 +255,11 @@ describe("napcat channel plugin", () => {
 		).toBe(false);
 	});
 
-	it("treats quoted group replies as addressed when mention-only triggering is enabled", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(
-			channel,
-			{
-				wsUrl: "ws://127.0.0.1:3001",
-				selfId: "999",
-			},
-			undefined,
-			"mention",
-		);
+		it("treats quoted group replies as addressed when mention-only triggering is enabled", async () => {
+			const plugin = await createTestPlugin({
+				config: { accessToken: undefined },
+				groupTrigger: "mention",
+			});
 
 		expect(
 			plugin.triggering.shouldProcessEvent({
@@ -293,16 +311,8 @@ describe("napcat channel plugin", () => {
 		expect(event?.blocks[0]).toEqual({ kind: "text", text: "/status" });
 	});
 
-	it("sends private and group replies through the OneBot client", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(
-			channel,
-			{
-				wsUrl: "ws://127.0.0.1:3001",
-				accessToken: "token",
-				selfId: "999",
-			},
-		);
+		it("sends private and group replies through the OneBot client", async () => {
+			const plugin = await createTestPlugin();
 		const client = clientMocks.instances[0];
 		expect(client.config).toMatchObject({
 			options: expect.objectContaining({
@@ -361,13 +371,8 @@ describe("napcat channel plugin", () => {
 		expect(groupRefs[0]?.messageId).toBe("202");
 	});
 
-	it("hydrates inbound image attachments from remote urls", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(channel, {
-			wsUrl: "ws://127.0.0.1:3001",
-			accessToken: "token",
-			selfId: "999",
-		});
+		it("hydrates inbound image attachments from remote urls", async () => {
+			const plugin = await createTestPlugin();
 		const tempDir = mkdtempSync(join(tmpdir(), "nekoclaw-napcat-"));
 		vi.stubGlobal(
 			"fetch",
@@ -414,13 +419,8 @@ describe("napcat channel plugin", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("hydrates inbound file attachments via GetFile base64", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(channel, {
-			wsUrl: "ws://127.0.0.1:3001",
-			accessToken: "token",
-			selfId: "999",
-		});
+		it("hydrates inbound file attachments via GetFile base64", async () => {
+			const plugin = await createTestPlugin();
 		const client = clientMocks.instances[0];
 		client.getFile.mockResolvedValue({
 			file: "",
@@ -468,13 +468,8 @@ describe("napcat channel plugin", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("sends image and file attachments through the OneBot client", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(channel, {
-			wsUrl: "ws://127.0.0.1:3001",
-			accessToken: "token",
-			selfId: "999",
-		});
+		it("sends image and file attachments through the OneBot client", async () => {
+			const plugin = await createTestPlugin();
 		const client = clientMocks.instances[0];
 		const tempDir = mkdtempSync(join(tmpdir(), "nekoclaw-napcat-"));
 		const imagePath = join(tempDir, "image.png");
@@ -517,15 +512,10 @@ describe("napcat channel plugin", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("treats /pair in groups as a pairing trigger", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(
-			channel,
-			{
-				wsUrl: "ws://127.0.0.1:3001",
-				selfId: "999",
-			},
-		);
+		it("treats /pair in groups as a pairing trigger", async () => {
+			const plugin = await createTestPlugin({
+				config: { accessToken: undefined },
+			});
 
 		expect(
 			plugin.pairing.shouldOfferPair({
@@ -541,13 +531,8 @@ describe("napcat channel plugin", () => {
 		).toBe(true);
 	});
 
-	it("listens to the OneBot subtyped message events", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(channel, {
-			wsUrl: "ws://127.0.0.1:3001",
-			accessToken: "token",
-			selfId: "999",
-		});
+		it("listens to the OneBot subtyped message events", async () => {
+			const plugin = await createTestPlugin();
 		const client = clientMocks.instances[0];
 		const events: Array<{ chatId: string; chatKind: "dm" | "group"; text: string }> = [];
 
@@ -606,14 +591,9 @@ describe("napcat channel plugin", () => {
 		]);
 	});
 
-	it("reuses the existing client connection for multiple sends", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(channel, {
-			wsUrl: "ws://127.0.0.1:3001",
-			accessToken: "token",
-			selfId: "999",
-		});
-		const client = clientMocks.instances[0];
+		it("reuses the existing client connection for multiple sends", async () => {
+			const plugin = await createTestPlugin();
+			const client = clientMocks.instances[0];
 
 		await plugin.actions.send({
 			chatId: "123456",
@@ -626,16 +606,90 @@ describe("napcat channel plugin", () => {
 			payload: { text: "second" },
 		});
 
-		expect(client.startCalls).toBe(1);
-	});
-
-	it("does not reconnect just because the sdk emitted a non-fatal error event", async () => {
-		const { createNapcatChannelPlugin } = await import("../src/channels/napcat.js");
-		const plugin = createNapcatChannelPlugin(channel, {
-			wsUrl: "ws://127.0.0.1:3001",
-			accessToken: "token",
-			selfId: "999",
+			expect(client.startCalls).toBe(1);
 		});
+
+		it("delays plain sends by 1-3 seconds before calling the NapCat API", async () => {
+			vi.useFakeTimers();
+			const plugin = await createTestPlugin({
+				sendDelayMs: () => 1_500,
+			});
+			const client = clientMocks.instances[0];
+
+			const sendPromise = plugin.actions.send({
+				chatId: "123456",
+				chatKind: "dm",
+				payload: { text: "delayed hello" },
+			});
+			await Promise.resolve();
+
+			expect(client.callApi).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1_499);
+			expect(client.callApi).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(sendPromise).resolves.toEqual([
+				{
+					chatId: "123456",
+					messageId: "101",
+				},
+			]);
+			expect(client.callApi).toHaveBeenCalledTimes(1);
+		});
+
+		it("delays replies before sending them", async () => {
+			vi.useFakeTimers();
+			const plugin = await createTestPlugin({
+				sendDelayMs: () => 3_000,
+			});
+			const client = clientMocks.instances[0];
+
+			const replyPromise = plugin.actions.reply({
+				chatId: "777",
+				chatKind: "group",
+				replyToId: "10",
+				payload: { text: "delayed reply" },
+			});
+			await Promise.resolve();
+
+			await vi.advanceTimersByTimeAsync(2_999);
+			expect(client.callApi).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(replyPromise).resolves.toEqual([
+				{
+					chatId: "777",
+					messageId: "202",
+				},
+			]);
+			expect(client.callApi).toHaveBeenCalledTimes(1);
+		});
+
+		it("cancels a delayed send if the plugin stops before the wait ends", async () => {
+			vi.useFakeTimers();
+			const plugin = await createTestPlugin({
+				sendDelayMs: () => 2_000,
+			});
+			const client = clientMocks.instances[0];
+
+			const sendPromise = plugin.actions.send({
+				chatId: "123456",
+				chatKind: "dm",
+				payload: { text: "will cancel" },
+			}).catch((error: unknown) => error);
+			await Promise.resolve();
+
+			await vi.advanceTimersByTimeAsync(1_000);
+			plugin.startPolling({ onEvent: async () => undefined });
+			plugin.stop();
+			await vi.advanceTimersByTimeAsync(1_000);
+
+			const error = await sendPromise;
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toBe("NapCat send cancelled because the plugin stopped");
+			expect(client.callApi).not.toHaveBeenCalled();
+		});
+
+		it("does not reconnect just because the sdk emitted a non-fatal error event", async () => {
+			const plugin = await createTestPlugin();
 		const client = clientMocks.instances[0];
 		const errors: string[] = [];
 
@@ -654,6 +708,92 @@ describe("napcat channel plugin", () => {
 		});
 
 		expect(errors).toEqual(["temporary issue"]);
+		expect(client.startCalls).toBe(1);
+	});
+
+		it("reconnects with backoff after the connection closes and reports recovery", async () => {
+			vi.useFakeTimers();
+			const plugin = await createTestPlugin();
+		const client = clientMocks.instances[0];
+		const healthy = vi.fn();
+		const errors: string[] = [];
+
+		plugin.startPolling({
+			onEvent: async () => undefined,
+			onError: (error) => {
+				errors.push(error.message);
+			},
+			onHealthy: healthy,
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		client.connection = undefined;
+		client.emit("close", { code: 1006 });
+		expect(client.startCalls).toBe(1);
+		expect(healthy).toHaveBeenCalledTimes(0);
+
+		await vi.advanceTimersByTimeAsync(999);
+		expect(client.startCalls).toBe(1);
+		await vi.advanceTimersByTimeAsync(1);
+
+		expect(client.startCalls).toBe(2);
+		expect(healthy).toHaveBeenCalledTimes(1);
+		expect(errors).toEqual([expect.stringContaining("connection lost")]);
+	});
+
+		it("keeps retrying failed reconnects with backoff and can recover on a later attempt", async () => {
+			vi.useFakeTimers();
+			const plugin = await createTestPlugin();
+		const client = clientMocks.instances[0];
+		const healthy = vi.fn();
+		const errors: string[] = [];
+
+		plugin.startPolling({
+			onEvent: async () => undefined,
+			onError: (error) => {
+				errors.push(error.message);
+			},
+			onHealthy: healthy,
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		client.startFailures.push(new Error("first reconnect failed"), new Error("second reconnect failed"));
+
+		client.connection = undefined;
+		client.emit("disconnect", {});
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(client.startCalls).toBe(2);
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(client.startCalls).toBe(3);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(client.startCalls).toBe(4);
+
+		expect(errors).toEqual([
+			expect.stringContaining("connection lost"),
+			"first reconnect failed",
+			"second reconnect failed",
+		]);
+		expect(healthy).toHaveBeenCalledTimes(1);
+	});
+
+		it("cancels pending reconnect attempts when stopped", async () => {
+			vi.useFakeTimers();
+			const plugin = await createTestPlugin();
+		const client = clientMocks.instances[0];
+
+		plugin.startPolling({
+			onEvent: async () => undefined,
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+
+		client.connection = undefined;
+		client.emit("close", { code: 1006 });
+		plugin.stop();
+		await vi.advanceTimersByTimeAsync(30_000);
+
 		expect(client.startCalls).toBe(1);
 	});
 });

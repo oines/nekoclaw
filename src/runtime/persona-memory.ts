@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { complete, type Context } from "@mariozechner/pi-ai";
 import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
@@ -18,9 +18,16 @@ const MAX_SELECTED_MEMORY_FILES = 3;
 const FORMATION_MIN_OBSERVATION_LINES = 50;
 const FORMATION_MAX_WAIT_MS = 30 * 60 * 1_000;
 const FORMATION_MAX_RETRIES = 3;
+const DREAM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const DREAM_DOC_EXCERPT_TOKEN_BUDGET = 220;
+const DREAM_OBSERVATION_EXCERPT_TOKEN_BUDGET = 180;
+const DREAM_MAX_TARGETS = 4;
+const DREAM_MAX_SOURCE_PATHS = 6;
 
-const formationLocks = new Map<string, Promise<void>>();
+const maintenanceLocks = new Map<string, Promise<void>>();
 const backlogSweepQueued = new Set<string>();
+const dreamQueued = new Set<string>();
+const dreamSkipAuditCache = new Map<string, string>();
 
 interface SelectorResult {
 	paths: string[];
@@ -44,6 +51,54 @@ interface FormationRetryState {
 	attempts: number;
 	updatedAt: string;
 	lastError?: string;
+}
+
+interface DreamState {
+	lastCompletedAt?: string;
+	lastAttemptedAt?: string;
+	lastCorpusSignature?: string;
+	lastError?: string;
+}
+
+interface DreamCorpusEntry {
+	path: string;
+	content: string;
+	excerpt: string;
+	mtimeMs: number;
+	sizeBytes: number;
+}
+
+interface DreamObservationEntry {
+	path: string;
+	content: string;
+	excerpt: string;
+	lineCount: number;
+	mtimeMs: number;
+	sizeBytes: number;
+}
+
+interface DreamCorpusSnapshot {
+	indexMarkdown: string;
+	people: DreamCorpusEntry[];
+	scenes: DreamCorpusEntry[];
+	observations: DreamObservationEntry[];
+	corpusSignature: string;
+}
+
+interface DreamPlannerTarget {
+	path: string;
+	sources: string[];
+	reason: string;
+}
+
+interface DreamPlannerResult {
+	targets: DreamPlannerTarget[];
+	notes: string;
+}
+
+interface DreamResult {
+	indexMarkdown: string;
+	writes: FormationWrite[];
 }
 
 function estimateTokens(value: string): number {
@@ -158,6 +213,16 @@ function listMarkdownFiles(dir: string, baseDir: string): string[] {
 	return files.sort();
 }
 
+function listFilesWithExtension(dir: string, baseDir: string, extension: string): string[] {
+	if (!existsSync(dir)) {
+		return [];
+	}
+	return readdirSync(dir, { withFileTypes: true })
+		.filter((entry) => entry.isFile() && entry.name.endsWith(extension))
+		.map((entry) => relative(baseDir, join(dir, entry.name)).replace(/\\/g, "/"))
+		.sort();
+}
+
 function safeJoinPersonaPath(personaDir: string, relativePath: string): string {
 	return join(personaDir, relativePath);
 }
@@ -268,6 +333,14 @@ function fallbackFormation(input: {
 	};
 }
 
+function isAllowedDreamSourcePath(value: string): boolean {
+	return !value.includes("..") && (value.startsWith("memory/") || value.startsWith("observations/"));
+}
+
+function buildDreamSkipKey(reason: string, details: Record<string, unknown>): string {
+	return JSON.stringify({ reason, ...details });
+}
+
 async function extractCompletionText(
 	model: NonNullable<ReturnType<ModelRegistry["find"]>>,
 	apiKey: string | undefined,
@@ -361,7 +434,7 @@ export class PersonaMemoryService {
 		personaContext: PreparedPersonaContext;
 		effectiveModel?: WorkerPayload["effectiveModel"];
 	}): void {
-		this.enqueueFormation(input.agent.agentId, async () => {
+		this.enqueueMaintenance(input.agent.agentId, async () => {
 			await this.runFormationForTurn(input);
 		});
 	}
@@ -371,7 +444,7 @@ export class PersonaMemoryService {
 			return;
 		}
 		backlogSweepQueued.add(agent.agentId);
-		this.enqueueFormation(agent.agentId, async () => {
+		this.enqueueMaintenance(agent.agentId, async () => {
 			try {
 				await this.runBacklogSweep(agent);
 			} finally {
@@ -380,12 +453,70 @@ export class PersonaMemoryService {
 		});
 	}
 
+	queueDream(agent: AgentSpec, options?: { force?: boolean; skipReason?: string }): void {
+		if (options?.skipReason) {
+			this.auditDreamSkip(agent, options.skipReason, {});
+			return;
+		}
+		if (dreamQueued.has(agent.agentId)) {
+			this.auditDreamSkip(agent, "already_queued", {});
+			return;
+		}
+		this.ensurePersonaLayout(agent.slug);
+		const state = this.readDreamState(agent.slug);
+		if (!options?.force && state.lastCompletedAt) {
+			const lastCompletedAt = Date.parse(state.lastCompletedAt);
+			if (!Number.isNaN(lastCompletedAt) && Date.now() - lastCompletedAt < DREAM_INTERVAL_MS) {
+				this.auditDreamSkip(agent, "not_due", { lastCompletedAt: state.lastCompletedAt });
+				return;
+			}
+		}
+		const snapshot = this.buildDreamCorpusSnapshot(agent.slug);
+		if (
+			snapshot.indexMarkdown.trim().length === 0 &&
+			snapshot.people.length === 0 &&
+			snapshot.scenes.length === 0 &&
+			snapshot.observations.length === 0
+		) {
+			this.auditDreamSkip(agent, "no_memory_files", {});
+			return;
+		}
+		if (!options?.force && state.lastCorpusSignature && state.lastCorpusSignature === snapshot.corpusSignature) {
+			this.auditDreamSkip(agent, "no_corpus_change", { corpusSignature: snapshot.corpusSignature });
+			return;
+		}
+		dreamQueued.add(agent.agentId);
+		dreamSkipAuditCache.delete(agent.agentId);
+		this.store.audit(agent.agentId, "persona.dream_queued", {
+			corpusSignature: snapshot.corpusSignature,
+			peopleFiles: snapshot.people.length,
+			sceneFiles: snapshot.scenes.length,
+			observationFiles: snapshot.observations.length,
+		});
+		this.enqueueMaintenance(agent.agentId, async () => {
+			try {
+				await this.runDream(agent);
+			} finally {
+				dreamQueued.delete(agent.agentId);
+			}
+		});
+	}
+
+	noteDreamSkip(agent: AgentSpec, reason: "agent_busy"): void {
+		this.auditDreamSkip(agent, reason, {});
+	}
+
+	whenIdle(agentId: string): Promise<void> {
+		return (maintenanceLocks.get(agentId) ?? Promise.resolve()).catch(() => undefined);
+	}
+
 	private ensurePersonaLayout(slug: string): void {
 		for (const dir of [
 			this.store.getPersonaDir(slug),
 			this.store.getPersonaPeopleDir(slug),
 			this.store.getPersonaScenesDir(slug),
 			this.store.getPersonaObservationsDir(slug),
+			this.store.getPersonaControlDir(slug),
 			this.getFormationRetryDir(slug),
 		]) {
 			if (!existsSync(dir)) {
@@ -425,6 +556,14 @@ export class PersonaMemoryService {
 
 	private clearFormationRetryState(slug: string, sceneRef: string): void {
 		removeFileIfExists(this.getFormationRetryStatePath(slug, sceneRef));
+	}
+
+	private readDreamState(slug: string): DreamState {
+		return readJsonFile<DreamState>(this.store.getPersonaDreamStatePath(slug), {});
+	}
+
+	private writeDreamState(slug: string, state: DreamState): void {
+		writeJsonFile(this.store.getPersonaDreamStatePath(slug), state);
 	}
 
 	private async runSelector(
@@ -486,9 +625,80 @@ export class PersonaMemoryService {
 				paths,
 				notes: normalizeText(parsed.notes) || "Selected detailed memories using the model.",
 			};
-		} catch {
-			return undefined;
+			} catch {
+				return undefined;
+			}
 		}
+
+	private buildDreamCorpusSnapshot(slug: string): DreamCorpusSnapshot {
+		this.ensurePersonaLayout(slug);
+		const personaDir = this.store.getPersonaDir(slug);
+		const people = listMarkdownFiles(this.store.getPersonaPeopleDir(slug), personaDir).map((path) => this.readDreamCorpusEntry(personaDir, path));
+		const scenes = listMarkdownFiles(this.store.getPersonaScenesDir(slug), personaDir).map((path) => this.readDreamCorpusEntry(personaDir, path));
+		const observations = listFilesWithExtension(this.store.getPersonaObservationsDir(slug), personaDir, ".log").map((path) =>
+			this.readDreamObservationEntry(personaDir, path),
+		);
+		const indexMarkdown = readTextFile(this.store.getPersonaIndexPath(slug), "");
+		const signatureSeed = [
+			`index:${indexMarkdown}`,
+			...people.map((entry) => `${entry.path}:${entry.content}`),
+			...scenes.map((entry) => `${entry.path}:${entry.content}`),
+			...observations.map((entry) => `${entry.path}:${entry.content}`),
+		].join("\n\n");
+		return {
+			indexMarkdown,
+			people,
+			scenes,
+			observations,
+			corpusSignature: createHash("sha256").update(signatureSeed).digest("hex"),
+		};
+	}
+
+	private readDreamCorpusEntry(personaDir: string, relativePath: string): DreamCorpusEntry {
+		const absolutePath = safeJoinPersonaPath(personaDir, relativePath);
+		const content = readTextFile(absolutePath, "");
+		const stats = statSync(absolutePath);
+		return {
+			path: relativePath,
+			content,
+			excerpt: trimToTokenBudget(content, DREAM_DOC_EXCERPT_TOKEN_BUDGET),
+			mtimeMs: stats.mtimeMs,
+			sizeBytes: stats.size,
+		};
+	}
+
+	private readDreamObservationEntry(personaDir: string, relativePath: string): DreamObservationEntry {
+		const absolutePath = safeJoinPersonaPath(personaDir, relativePath);
+		const content = readTextFile(absolutePath, "");
+		const stats = statSync(absolutePath);
+		const lines = content
+			.split(/\r?\n/)
+			.map((line) => line.trimEnd())
+			.filter((line) => line.length > 0);
+		return {
+			path: relativePath,
+			content,
+			excerpt: takeTailLinesWithinBudget(content, 24, DREAM_OBSERVATION_EXCERPT_TOKEN_BUDGET),
+			lineCount: lines.length,
+			mtimeMs: stats.mtimeMs,
+			sizeBytes: stats.size,
+		};
+	}
+
+	private auditDreamSkip(agent: AgentSpec, reason: string, details: Record<string, unknown>): void {
+		const cacheKey = buildDreamSkipKey(reason, details);
+		if (dreamSkipAuditCache.get(agent.agentId) === cacheKey) {
+			return;
+		}
+		dreamSkipAuditCache.set(agent.agentId, cacheKey);
+		this.store.audit(agent.agentId, "persona.dream_skipped", {
+			reason,
+			...details,
+		});
+	}
+
+	private clearDreamSkipAudit(agentId: string): void {
+		dreamSkipAuditCache.delete(agentId);
 	}
 
 	private async runFormationForTurn(input: {
@@ -539,6 +749,281 @@ export class PersonaMemoryService {
 			this.clearFormationRetryState(input.agent.slug, sceneRef);
 		} catch (error) {
 			this.handleFormationFailure(input.agent, sceneRef, observationPath, observationLines, error);
+		}
+	}
+
+	private async runDream(agent: AgentSpec): Promise<void> {
+		this.ensurePersonaLayout(agent.slug);
+		this.clearDreamSkipAudit(agent.agentId);
+		const snapshot = this.buildDreamCorpusSnapshot(agent.slug);
+		if (
+			snapshot.indexMarkdown.trim().length === 0 &&
+			snapshot.people.length === 0 &&
+			snapshot.scenes.length === 0 &&
+			snapshot.observations.length === 0
+		) {
+			this.auditDreamSkip(agent, "no_memory_files", {});
+			return;
+		}
+		const priorState = this.readDreamState(agent.slug);
+		this.writeDreamState(agent.slug, {
+			...priorState,
+			lastAttemptedAt: new Date().toISOString(),
+			lastError: undefined,
+		});
+		this.store.audit(agent.agentId, "persona.dream_started", {
+			corpusSignature: snapshot.corpusSignature,
+			peopleFiles: snapshot.people.length,
+			sceneFiles: snapshot.scenes.length,
+			observationFiles: snapshot.observations.length,
+		});
+		try {
+			const planner =
+				(await this.runDreamPlanner(agent, snapshot)) ?? {
+					targets: [],
+					notes: "Dream planner unavailable; rewriting index only from current corpus snapshot.",
+				};
+			const result =
+				(await this.runDreamWriter(agent, snapshot, planner)) ?? {
+					indexMarkdown: snapshot.indexMarkdown,
+					writes: [],
+				};
+			this.applyDreamResult(agent.slug, result);
+			this.writeDreamState(agent.slug, {
+				lastAttemptedAt: new Date().toISOString(),
+				lastCompletedAt: new Date().toISOString(),
+				lastCorpusSignature: snapshot.corpusSignature,
+				lastError: undefined,
+			});
+			this.store.audit(agent.agentId, "persona.dream_applied", {
+				corpusSignature: snapshot.corpusSignature,
+				targets: planner.targets.map((target) => target.path),
+				writes: result.writes.map((write) => write.path),
+			});
+			this.clearDreamSkipAudit(agent.agentId);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.writeDreamState(agent.slug, {
+				...priorState,
+				lastAttemptedAt: new Date().toISOString(),
+				lastError: message,
+			});
+			this.store.audit(agent.agentId, "persona.dream_failed", {
+				error: message,
+				corpusSignature: snapshot.corpusSignature,
+			});
+		}
+	}
+
+	private async runDreamPlanner(agent: AgentSpec, snapshot: DreamCorpusSnapshot): Promise<DreamPlannerResult | undefined> {
+		const modelConfig = this.resolveModel(agent, undefined);
+		if (!modelConfig) {
+			return undefined;
+		}
+		const knownPaths = new Set<string>([
+			...snapshot.people.map((entry) => entry.path),
+			...snapshot.scenes.map((entry) => entry.path),
+			...snapshot.observations.map((entry) => entry.path),
+		]);
+		const context: Context = {
+			systemPrompt: [
+				"你是 Nekoclaw Dream 的全局记忆规划器。",
+				"你的任务是基于 index、所有 memory 文件摘要和 observations 摘要，决定本轮 Dream 最值得处理的少量目标文件。",
+				"Dream 负责跨场景关联、index 全局重整、全局老化、发现 formation 遗漏。",
+				"不能编造事实；只能基于给定语料做规划。",
+				`最多选择 ${DREAM_MAX_TARGETS} 个目标文件；每个目标最多引用 ${DREAM_MAX_SOURCE_PATHS} 个来源路径。`,
+				"允许重写已有 people/scenes 文件，允许创建新的 people 文件，允许只做 index 全局重整。",
+				"不要规划删除 people/scenes 文件。",
+				"输出必须是 JSON：{\"targets\":[{\"path\":\"memory/people/x.md\",\"sources\":[\"memory/scenes/a.md\"],\"reason\":\"...\"}],\"notes\":\"...\"}",
+			].join("\n"),
+			messages: [
+				{
+					role: "user",
+					content: [
+						`当前 index.md：\n${snapshot.indexMarkdown || "(empty)"}`,
+						`people 文件摘要：\n${
+							snapshot.people.length > 0
+								? snapshot.people
+										.map(
+											(entry) =>
+												`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | bytes=${entry.sizeBytes}\n${entry.excerpt || "(empty)"}`,
+										)
+										.join("\n\n")
+								: "(none)"
+						}`,
+						`scene 文件摘要：\n${
+							snapshot.scenes.length > 0
+								? snapshot.scenes
+										.map(
+											(entry) =>
+												`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | bytes=${entry.sizeBytes}\n${entry.excerpt || "(empty)"}`,
+										)
+										.join("\n\n")
+								: "(none)"
+						}`,
+						`observations 摘要：\n${
+							snapshot.observations.length > 0
+								? snapshot.observations
+										.map(
+											(entry) =>
+												`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | lines=${entry.lineCount}\n${entry.excerpt || "(empty)"}`,
+										)
+										.join("\n\n")
+								: "(none)"
+						}`,
+					].join("\n\n"),
+					timestamp: Date.now(),
+				},
+			],
+		};
+		const raw = await extractCompletionText(modelConfig.model, modelConfig.apiKey, context);
+		const json = extractJsonObject(raw);
+		if (!json) {
+			return undefined;
+		}
+		const parsed = JSON.parse(json) as Partial<DreamPlannerResult>;
+		const targets = (parsed.targets ?? [])
+			.filter(
+				(target): target is DreamPlannerTarget =>
+					Boolean(target && typeof target.path === "string" && typeof target.reason === "string" && Array.isArray(target.sources)),
+			)
+			.map((target) => {
+				const normalizedSources = target.sources
+					.filter((source): source is string => typeof source === "string")
+					.filter((source) => knownPaths.has(source))
+					.slice(0, DREAM_MAX_SOURCE_PATHS);
+				return {
+					path: target.path,
+					sources: normalizedSources,
+					reason: normalizeText(target.reason),
+				};
+			})
+			.filter((target) => isAllowedMemoryPath(target.path))
+			.filter((target, index, items) => items.findIndex((entry) => entry.path === target.path) === index)
+			.slice(0, DREAM_MAX_TARGETS);
+		return {
+			targets,
+			notes: normalizeText(parsed.notes) || "Dream planner selected no explicit targets.",
+		};
+	}
+
+	private async runDreamWriter(
+		agent: AgentSpec,
+		snapshot: DreamCorpusSnapshot,
+		planner: DreamPlannerResult,
+	): Promise<DreamResult | undefined> {
+		const modelConfig = this.resolveModel(agent, undefined);
+		if (!modelConfig) {
+			return undefined;
+		}
+		const corpusEntries = new Map<string, DreamCorpusEntry | DreamObservationEntry>([
+			...snapshot.people.map((entry) => [entry.path, entry] as const),
+			...snapshot.scenes.map((entry) => [entry.path, entry] as const),
+			...snapshot.observations.map((entry) => [entry.path, entry] as const),
+		]);
+		const targetDocs = planner.targets.map((target) => ({
+			path: target.path,
+			reason: target.reason,
+			existingContent: corpusEntries.get(target.path)?.content ?? "",
+			sourceDocs: target.sources
+				.filter((source) => isAllowedDreamSourcePath(source))
+				.map((source) => ({
+					path: source,
+					content:
+						source.startsWith("observations/")
+							? takeTailLinesWithinBudget(corpusEntries.get(source)?.content ?? "", 40, SCENE_OBSERVATION_TOKEN_BUDGET)
+							: corpusEntries.get(source)?.content ?? "",
+				}))
+				.filter((source) => source.content.trim().length > 0),
+		}));
+		const context: Context = {
+			systemPrompt: [
+				"你是 Nekoclaw Dream 的全局记忆整理器。",
+				"Dream 不替代 per-scene formation，而是做 formation 看不到的全局工作：跨场景关联、index 一致性重整、全局老化、发现遗漏人物。",
+				"你只能根据给定的记忆文件和 observations 写内容，不能编造文件里没有的信息。",
+				"observations 只作为补充线索，不消费、不删改。",
+				"纠偏信息、确认的身份关联、跨平台关联、核心关系和长期背景是高优先级内容，压缩时必须保留。",
+				"index.md 必须是 memory 文件内容的一致快照；可以清理 index 中指向不存在文件的引用。",
+				"只允许重写 index.md，以及重写/创建给定目标文件；不要删除任何 people/scenes 文件。",
+				"输出必须是 JSON：{\"indexMarkdown\":\"...\",\"writes\":[{\"path\":\"memory/people/x.md\",\"content\":\"...\"}]}",
+			].join("\n"),
+			messages: [
+				{
+					role: "user",
+					content: [
+						`当前 index.md：\n${snapshot.indexMarkdown || "(empty)"}`,
+						`全局 memory 摘要：\n${
+							[...snapshot.people, ...snapshot.scenes]
+								.map(
+									(entry) =>
+										`- ${entry.path} | mtime=${new Date(entry.mtimeMs).toISOString()} | bytes=${entry.sizeBytes}\n${entry.excerpt || "(empty)"}`,
+								)
+								.join("\n\n") || "(none)"
+						}`,
+						`全局 observations 摘要：\n${
+							snapshot.observations.length > 0
+								? snapshot.observations
+										.map(
+											(entry) =>
+												`- ${entry.path} | lines=${entry.lineCount} | mtime=${new Date(entry.mtimeMs).toISOString()}\n${entry.excerpt || "(empty)"}`,
+										)
+										.join("\n\n")
+								: "(none)"
+						}`,
+						`Dream planner notes：${planner.notes || "(none)"}`,
+						`本轮目标文件：\n${
+							targetDocs.length > 0
+								? targetDocs
+										.map((target) =>
+											[
+												`### ${target.path}`,
+												`原因：${target.reason || "(none)"}`,
+												`现有内容：\n${target.existingContent || "(new file)"}`,
+												`相关来源：\n${
+													target.sourceDocs.length > 0
+														? target.sourceDocs.map((source) => `#### ${source.path}\n${source.content}`).join("\n\n")
+														: "(none)"
+												}`,
+											].join("\n\n"),
+										)
+										.join("\n\n")
+								: "(none)"
+						}`,
+					].join("\n\n"),
+					timestamp: Date.now(),
+				},
+			],
+		};
+		const raw = await extractCompletionText(modelConfig.model, modelConfig.apiKey, context);
+		const json = extractJsonObject(raw);
+		if (!json) {
+			return undefined;
+		}
+		const parsed = JSON.parse(json) as Partial<DreamResult>;
+		const allowedTargetPaths = new Set(planner.targets.map((target) => target.path));
+		const writes = (parsed.writes ?? [])
+			.filter((entry): entry is FormationWrite => Boolean(entry && typeof entry.path === "string" && typeof entry.content === "string"))
+			.filter((entry) => isAllowedMemoryPath(entry.path))
+			.filter((entry) => allowedTargetPaths.has(entry.path))
+			.map((entry) => ({
+				path: entry.path,
+				content: `${normalizeText(entry.content)}\n`,
+			}));
+		return {
+			indexMarkdown: normalizeText(parsed.indexMarkdown) || snapshot.indexMarkdown,
+			writes,
+		};
+	}
+
+	private applyDreamResult(slug: string, result: DreamResult): void {
+		this.ensurePersonaLayout(slug);
+		writeTextFile(this.store.getPersonaIndexPath(slug), `${normalizeText(result.indexMarkdown)}\n`);
+		const personaDir = this.store.getPersonaDir(slug);
+		for (const write of result.writes) {
+			if (!isAllowedMemoryPath(write.path)) {
+				continue;
+			}
+			writeTextFile(safeJoinPersonaPath(personaDir, write.path), `${normalizeText(write.content)}\n`);
 		}
 	}
 
@@ -767,8 +1252,8 @@ export class PersonaMemoryService {
 		return { model, apiKey };
 	}
 
-	private enqueueFormation(agentId: string, task: () => Promise<void>): void {
-		const current = formationLocks.get(agentId) ?? Promise.resolve();
+	private enqueueMaintenance(agentId: string, task: () => Promise<void>): void {
+		const current = maintenanceLocks.get(agentId) ?? Promise.resolve();
 		const next = current
 			.catch(() => undefined)
 			.then(task)
@@ -778,10 +1263,10 @@ export class PersonaMemoryService {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			});
-		formationLocks.set(agentId, next);
+		maintenanceLocks.set(agentId, next);
 		void next.finally(() => {
-			if (formationLocks.get(agentId) === next) {
-				formationLocks.delete(agentId);
+			if (maintenanceLocks.get(agentId) === next) {
+				maintenanceLocks.delete(agentId);
 			}
 		});
 	}

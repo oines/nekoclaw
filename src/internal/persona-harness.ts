@@ -12,6 +12,11 @@ export const PERSONA_HARNESS_SCENARIOS = [
 	"persona_uncertainty",
 	"persona_multi_group_experience",
 	"persona_memory_decay",
+	"persona_dream_cross_scene_association",
+	"persona_dream_index_rebuild",
+	"persona_dream_global_aging",
+	"persona_dream_find_missing_person",
+	"persona_dream_preserves_identity",
 ] as const;
 
 export async function runPersonaHarness(

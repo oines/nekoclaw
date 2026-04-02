@@ -162,9 +162,11 @@ export class NekoclawDaemon {
 	private queuePersonaBacklogSweeps(): void {
 		for (const agent of this.store.listAgents()) {
 			if (this.processingAgents.has(agent.agentId)) {
+				this.personaMemory.noteDreamSkip(agent, "agent_busy");
 				continue;
 			}
 			this.personaMemory.queueBacklogSweep(agent);
+			this.personaMemory.queueDream(agent);
 		}
 	}
 }

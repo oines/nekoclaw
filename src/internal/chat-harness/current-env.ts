@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createNapcatChannelPlugin } from "../../channels/napcat.js";
 import { createTelegramChannelPlugin } from "../../channels/telegram.js";
@@ -10,6 +10,7 @@ import { MessageRouterService } from "../../runtime/message-router.js";
 import { OutboundDispatchService } from "../../runtime/outbound-dispatch.js";
 import { CommandRouterService } from "../../runtime/command-router.js";
 import { WorkerRunnerService } from "../../runtime/worker-runner.js";
+import { PersonaMemoryService } from "../../runtime/persona-memory.js";
 import { getRuntimeKey } from "../../runtime/runtime-key.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import type {
@@ -26,7 +27,10 @@ import type {
 } from "../../types.js";
 import { FakeNapcatClient, FakeTelegramBot, type HarnessTranscriptEntry, createTelegramMessage } from "./fake-transports.js";
 import {
+	judgeHarnessArtifacts,
 	judgeHarnessReply,
+	type HarnessArtifactJudgeResult,
+	type HarnessArtifactJudgeSpec,
 	type HarnessReplyJudgeResult,
 	type HarnessReplyJudgeSpec,
 } from "./judge.js";
@@ -61,7 +65,7 @@ export interface InternalChatHarnessScenarioResult {
 	durationMs: number;
 	error?: string;
 	outboundPreview?: string;
-	judge?: HarnessReplyJudgeResult;
+	judge?: HarnessReplyJudgeResult | HarnessArtifactJudgeResult;
 	evidence: InternalChatHarnessEvidence;
 }
 
@@ -136,7 +140,7 @@ interface ScenarioContext extends CurrentEnvHarnessContext {
 interface ScenarioDefinition {
 	name: string;
 	channel: Exclude<HarnessChannel, "both">;
-	run(context: ScenarioContext): Promise<HarnessReplyJudgeResult | void>;
+	run(context: ScenarioContext): Promise<HarnessReplyJudgeResult | HarnessArtifactJudgeResult | void>;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -394,6 +398,27 @@ async function judgeLatestOutbound(
 		spec,
 		reply,
 		transcript: transcriptForChat(context.driver, chatId),
+	});
+}
+
+function readPersonaRelativeFile(context: ScenarioContext, relativePath: string): string {
+	return readFileSync(join(context.store.getPersonaDir(context.agent.slug), relativePath), "utf-8");
+}
+
+async function forceDreamAndWait(context: ScenarioContext): Promise<void> {
+	const personaMemory = new PersonaMemoryService(context.store);
+	personaMemory.queueDream(context.agent, { force: true });
+	await personaMemory.whenIdle(context.agent.agentId);
+}
+
+async function judgePersonaArtifacts(
+	context: ScenarioContext,
+	spec: HarnessArtifactJudgeSpec,
+	sections: Array<{ label: string; content: string }>,
+): Promise<HarnessArtifactJudgeResult> {
+	return judgeHarnessArtifacts(context.store, context.agent, {
+		spec,
+		evidence: sections.map((section) => `## ${section.label}\n${section.content}`).join("\n\n"),
 	});
 }
 
@@ -1521,6 +1546,334 @@ async function scenarioPersonaMemoryDecay(context: ScenarioContext): Promise<Har
 	});
 }
 
+async function scenarioDreamCrossSceneAssociation(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我认识的人",
+			"- 小王(tg:111)：在群 A 聊创业项目 → memory/people/telegram-111.md",
+			"",
+			"## 我在的群",
+			"- 群A(tg:-100201)：最近在聊创业 → memory/scenes/telegram-group-100201.md",
+			"- 群B(tg:-100202)：最近有招人讨论 → memory/scenes/telegram-group-100202.md",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaPeopleDir(context.agent.slug), "telegram-111.md"),
+		[
+			"小王是在 TG 上认识的（tg:111）。",
+			"他在群 A 里聊过自己的创业项目，当时主要在说产品方向和推进节奏。",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaScenesDir(context.agent.slug), "telegram-group-100201.md"),
+		[
+			"群 A 最近主要在讨论创业项目。",
+			"小王提到自己最近在推进创业方向，还在调整产品定位。",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaScenesDir(context.agent.slug), "telegram-group-100202.md"),
+		[
+			"群 B 最近有人在讨论招人。",
+			"小王提到团队最近开始招人，事情很多。",
+		].join("\n"),
+		"utf-8",
+	);
+
+	await forceDreamAndWait(context);
+
+	return judgePersonaArtifacts(
+		context,
+		{
+			title: "Dream 场景 1：跨场景人物关联",
+			expectations: [
+				"people/wang 文件应同时反映群 A 的创业和群 B 的招人信息。",
+				"index.md 中小王摘要应体现两个群的经历，而不是只保留单一场景。",
+			],
+			failureSignals: [
+				"people 文件仍然只有单个群的信息。",
+				"新增重复人物文件或把群 B 信息写进错误人物文件。",
+				"index 摘要没有体现跨场景整合结果。",
+			],
+		},
+		[
+			{ label: "index.md", content: readFileSync(context.store.getPersonaIndexPath(context.agent.slug), "utf-8") },
+			{ label: "people/telegram-111.md", content: readPersonaRelativeFile(context, "memory/people/telegram-111.md") },
+			{ label: "scene A", content: readPersonaRelativeFile(context, "memory/scenes/telegram-group-100201.md") },
+			{ label: "scene B", content: readPersonaRelativeFile(context, "memory/scenes/telegram-group-100202.md") },
+		],
+	);
+}
+
+async function scenarioDreamIndexRebuild(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我认识的人",
+			"- 小王(tg:111)：正在准备毕业论文 → memory/people/telegram-111.md",
+			"- 王同学(tg:111)：同一个人，但条目重复了 → memory/people/telegram-111.md",
+			"",
+			"## 我在的群",
+			"- 群C(tg:-100203)：这条引用已经失效 → memory/scenes/telegram-group-100203.md",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaPeopleDir(context.agent.slug), "telegram-111.md"),
+		[
+			"小王是在 TG 上认识的（tg:111）。",
+			"他之前准备毕业论文，但现在已经答辩完了。",
+			"最近在收尾项目和后续安排。",
+		].join("\n"),
+		"utf-8",
+	);
+
+	await forceDreamAndWait(context);
+
+	return judgePersonaArtifacts(
+		context,
+		{
+			title: "Dream 场景 2：index.md 全局重整",
+			expectations: [
+				"重复条目应被合并，过时摘要应和正文保持一致。",
+				"index 不应继续引用不存在的 scene 文件。",
+			],
+			failureSignals: [
+				"小王和王同学仍然在 index 里重复出现。",
+				"index 仍然保留失效文件引用。",
+				"摘要还写着旧状态，没有和 people 正文同步。",
+			],
+		},
+		[
+			{ label: "index.md", content: readFileSync(context.store.getPersonaIndexPath(context.agent.slug), "utf-8") },
+			{ label: "people/telegram-111.md", content: readPersonaRelativeFile(context, "memory/people/telegram-111.md") },
+		],
+	);
+}
+
+async function scenarioDreamGlobalAging(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	const laoLiPath = join(context.store.getPersonaPeopleDir(context.agent.slug), "lao-li.md");
+	const xiaoWangPath = join(context.store.getPersonaPeopleDir(context.agent.slug), "xiao-wang.md");
+	const laoLiBefore = [
+		"老李是以前经常来找我聊工具链的人。",
+		"那阵子他详细聊过一连串临时细节、会议插曲、群里插话和很多当时的上下文。",
+		"这些细枝末节在当时有意义，但现在已经过去很久。",
+		"他整体给人的印象是务实、会推荐工具、和我有过稳定互动。",
+		"",
+		"补充细节：会议纪要、临时安排、某次周会插曲、某个群里转述、某次小 bug 的过程、一些当时的碎碎念。",
+	].join("\n");
+	const xiaoWangBefore = [
+		"小王目前仍然很活跃，持续在找我聊创业项目、招人和数据库问题。",
+		"最近这几周他还反复提到支付链路、选型调整、团队协作和推进节奏。",
+		"这些细节目前仍然有持续价值，因为他还一直在出现。",
+	].join("\n");
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我认识的人",
+			"- 老李(tg:222)：以前常聊工具链和项目细节 → memory/people/lao-li.md",
+			"- 小王(tg:111)：持续活跃，最近常聊创业和技术推进 → memory/people/xiao-wang.md",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(laoLiPath, laoLiBefore, "utf-8");
+	writeFileSync(xiaoWangPath, xiaoWangBefore, "utf-8");
+	utimesSync(laoLiPath, new Date("2026-01-01T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"));
+	utimesSync(xiaoWangPath, new Date("2026-04-01T00:00:00.000Z"), new Date("2026-04-01T00:00:00.000Z"));
+	writeFileSync(
+		join(context.store.getPersonaObservationPath(context.agent.slug, "telegram-group-active")),
+		[
+			"[2026-04-01T00:00:00.000Z] telegram:111 小王: 最近又在忙招人和支付链路。",
+			"[2026-04-01T00:10:00.000Z] telegram:111 小王: 创业项目这阵子节奏很快。",
+		].join("\n"),
+		"utf-8",
+	);
+
+	await forceDreamAndWait(context);
+
+	const laoLiAfter = readPersonaRelativeFile(context, "memory/people/lao-li.md");
+	const xiaoWangAfter = readPersonaRelativeFile(context, "memory/people/xiao-wang.md");
+	return judgePersonaArtifacts(
+		context,
+		{
+			title: "Dream 场景 3：全局老化",
+			expectations: [
+				"老李文件应明显压缩，但保留他是谁、和 bot 的关系等核心印象。",
+				"小王作为活跃人物，不应被同等力度压缩。",
+				"index 摘要应和压缩后的正文一致。",
+			],
+			failureSignals: [
+				"老李文件几乎没变化，或被直接删掉。",
+				"活跃的小王也被大幅压缩到失去当前细节。",
+				"压缩后丢失老李的核心身份与关系。",
+			],
+		},
+		[
+			{ label: "index.md", content: readFileSync(context.store.getPersonaIndexPath(context.agent.slug), "utf-8") },
+			{ label: "老李 before/after", content: `Before length=${laoLiBefore.length}\nAfter length=${laoLiAfter.length}\n\n${laoLiAfter}` },
+			{ label: "小王 before/after", content: `Before length=${xiaoWangBefore.length}\nAfter length=${xiaoWangAfter.length}\n\n${xiaoWangAfter}` },
+		],
+	);
+}
+
+async function scenarioDreamFindsMissingPerson(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我在的群",
+			"- 群甲：最近常聊工具 → memory/scenes/scene-a.md",
+			"- 群乙：最近常聊方案 → memory/scenes/scene-b.md",
+			"- 群丙：最近常聊推荐 → memory/scenes/scene-c.md",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaScenesDir(context.agent.slug), "scene-a.md"),
+		"群里有人说：张三推荐的那个工具不错，用起来挺顺手。",
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaScenesDir(context.agent.slug), "scene-b.md"),
+		"有人提议这个方案可以去问问张三，因为张三之前评估过。",
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaScenesDir(context.agent.slug), "scene-c.md"),
+		"另一群里又提到张三之前说过这个方案更稳一点。",
+		"utf-8",
+	);
+
+	await forceDreamAndWait(context);
+
+	const peopleFiles = readdirSync(context.store.getPersonaPeopleDir(context.agent.slug))
+		.filter((name) => name.endsWith(".md"))
+		.map((name) => `### ${name}\n${readFileSync(join(context.store.getPersonaPeopleDir(context.agent.slug), name), "utf-8")}`)
+		.join("\n\n");
+	return judgePersonaArtifacts(
+		context,
+		{
+			title: "Dream 场景 4：发现 formation 遗漏",
+			expectations: [
+				"Dream 应发现张三在多个场景被反复提及，并创建一个汇总性的 people 文件。",
+				"index.md 中应出现张三条目，但内容只能基于已有提及，不能编造背景。",
+			],
+			failureSignals: [
+				"Dream 结束后仍然没有张三的 people 文件。",
+				"Dream 编造了张三从未出现过的背景身份。",
+				"index 里没有反映这个新增人物。",
+			],
+		},
+		[
+			{ label: "index.md", content: readFileSync(context.store.getPersonaIndexPath(context.agent.slug), "utf-8") },
+			{ label: "people files", content: peopleFiles || "(none)" },
+			{ label: "scene files", content: ["scene-a.md", "scene-b.md", "scene-c.md"].map((name) => `### ${name}\n${readFileSync(join(context.store.getPersonaScenesDir(context.agent.slug), name), "utf-8")}`).join("\n\n") },
+		],
+	);
+}
+
+async function scenarioDreamPreservesIdentity(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我认识的人",
+			"- 小王(tg:111, qq:222)：之前聊过毕业论文。注意：tg:333 不是小王，是李四 → memory/people/xiao-wang.md",
+			"- 李四(tg:333)：小王的同事。注意：tg:333 不是小王 → memory/people/li-si.md",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaPeopleDir(context.agent.slug), "xiao-wang.md"),
+		[
+			"小王最早在 TG 上认识（tg:111），后来确认 QQ 上也是他（qq:222）。",
+			"之前聊过毕业论文，后来又提到改了题目。",
+			"纠偏信息：tg:333 不是小王，是李四。",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaPeopleDir(context.agent.slug), "li-si.md"),
+		[
+			"李四是小王的同事，账号是 tg:333。",
+			"他明确纠正过：tg:333 不是小王。",
+		].join("\n"),
+		"utf-8",
+	);
+
+	await forceDreamAndWait(context);
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "333",
+		senderId: "333",
+		senderName: "李四",
+		text: "pair me",
+		occurredAt: "2026-04-10T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, "333");
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "333",
+		senderId: "333",
+		senderName: "李四",
+		text: "你还记得我是谁吗？",
+		occurredAt: "2026-04-10T00:01:00.000Z",
+	});
+
+	const napcatDriver = context.drivers.get("napcat");
+	if (napcatDriver) {
+		await napcatDriver.sendMessage({
+			chatKind: "dm",
+			chatId: "222",
+			senderId: "222",
+			senderName: "QQ小王",
+			text: "pair me",
+			occurredAt: "2026-04-11T00:00:00.000Z",
+		});
+		await waitForQueueIdle(context);
+		await acceptPendingPairForChannel(context, "napcat", "222");
+		await napcatDriver.sendMessage({
+			chatKind: "dm",
+			chatId: "222",
+			senderId: "222",
+			senderName: "QQ小王",
+			text: "我是小王，之前在 TG 上跟你聊过，我论文后来改题目了",
+			occurredAt: "2026-04-11T00:01:00.000Z",
+		});
+		await waitForQueueIdle(context);
+	}
+
+	return judgePersonaArtifacts(
+		context,
+		{
+			title: "Dream 场景 5：不破坏现有记忆",
+			expectations: [
+				"Dream 后纠偏信息仍然存在，tg:333 不应再被当成小王。",
+				"Dream 后跨平台关联仍然存在，QQ 上的小王线索应还能和 TG 里的经历衔接。",
+				"Dream 后的正常回复质量不应低于 Dream 前。",
+			],
+			failureSignals: [
+				"纠偏信息在 Dream 重写后丢失，导致再次认错人。",
+				"跨平台关联被整理掉，QQ 上的小王又像陌生人。",
+				"Dream 后回复明显回退到不记得或乱认人。",
+			],
+		},
+		[
+			{ label: "index.md", content: readFileSync(context.store.getPersonaIndexPath(context.agent.slug), "utf-8") },
+			{ label: "xiao-wang.md", content: readPersonaRelativeFile(context, "memory/people/xiao-wang.md") },
+			{ label: "li-si.md", content: readPersonaRelativeFile(context, "memory/people/li-si.md") },
+			{ label: "Telegram DM 333 transcript", content: transcriptForChat(context.driver, "333").join("\n") || "(none)" },
+			{
+				label: "Napcat DM 222 transcript",
+				content: napcatDriver ? transcriptForChat(napcatDriver, "222").join("\n") || "(none)" : "(napcat driver unavailable)",
+			},
+		],
+	);
+}
+
 const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "dm_pair_prompt", channel: "telegram", run: scenarioDmPairPrompt },
 	{ name: "dm_pair_accept_and_chat", channel: "telegram", run: scenarioDmPairAcceptAndChat },
@@ -1549,6 +1902,11 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "persona_uncertainty", channel: "telegram", run: scenarioPersonaUncertainty },
 	{ name: "persona_multi_group_experience", channel: "telegram", run: scenarioPersonaMultiGroupExperience },
 	{ name: "persona_memory_decay", channel: "telegram", run: scenarioPersonaMemoryDecay },
+	{ name: "persona_dream_cross_scene_association", channel: "telegram", run: scenarioDreamCrossSceneAssociation },
+	{ name: "persona_dream_index_rebuild", channel: "telegram", run: scenarioDreamIndexRebuild },
+	{ name: "persona_dream_global_aging", channel: "telegram", run: scenarioDreamGlobalAging },
+	{ name: "persona_dream_find_missing_person", channel: "telegram", run: scenarioDreamFindsMissingPerson },
+	{ name: "persona_dream_preserves_identity", channel: "telegram", run: scenarioDreamPreservesIdentity },
 	{ name: "dm_pair_prompt", channel: "napcat", run: scenarioDmPairPrompt },
 	{ name: "dm_pair_accept_and_chat", channel: "napcat", run: scenarioDmPairAcceptAndChat },
 	{ name: "dm_context_continuity", channel: "napcat", run: scenarioDmContextContinuity },
@@ -1724,11 +2082,11 @@ class NapcatHarnessDriver implements HarnessDriver {
 				wsUrl: "ws://127.0.0.1:6700",
 				selfId: this.selfId,
 			},
-			undefined,
-			undefined,
-			{ client: this.client },
-		);
-	}
+				undefined,
+				undefined,
+				{ client: this.client, sendDelayMs: () => 0 },
+			);
+		}
 
 	getTranscript(): HarnessTranscriptEntry[] {
 		return this.client.transcript;
@@ -2114,7 +2472,7 @@ export async function runChatHarnessInCurrentEnvironment(
 				adminUserId: String(90001 + results.length + 1),
 			};
 			presetGroupTrigger(scenarioContext, "all");
-			let judge: HarnessReplyJudgeResult | undefined;
+				let judge: HarnessReplyJudgeResult | HarnessArtifactJudgeResult | undefined;
 			try {
 				judge = (await scenario.run(scenarioContext)) ?? undefined;
 				if (judge && judge.verdict === "fail") {

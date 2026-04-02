@@ -112,7 +112,7 @@ describe("runtime directory service", () => {
 			}),
 		);
 
-		expect(snapshot.availableChannels).toEqual(["napcat", "telegram"]);
+			expect(snapshot.availableChannels).toEqual(["qq", "telegram"]);
 		expect(snapshot.contacts).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
@@ -125,11 +125,11 @@ describe("runtime directory service", () => {
 					displayName: "Dave",
 					sourceHints: ["seen_in_group"],
 				}),
-				expect.objectContaining({
-					account: "napcat:dm:456",
-					displayName: "Bob",
-					sourceHints: ["pair_request"],
-				}),
+					expect.objectContaining({
+						account: "qq:dm:456",
+						displayName: "Bob",
+						sourceHints: ["pair_request"],
+					}),
 			]),
 		);
 		expect(snapshot.groups).toEqual(

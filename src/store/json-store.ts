@@ -103,6 +103,14 @@ export class JsonNekoclawStore {
 		return this.agents.getPersonaObservationPath(slug, sceneRef);
 	}
 
+	getPersonaControlDir(slug: string): string {
+		return this.agents.getPersonaControlDir(slug);
+	}
+
+	getPersonaDreamStatePath(slug: string): string {
+		return this.agents.getPersonaDreamStatePath(slug);
+	}
+
 	getSessionDir(slug: string, sessionRecordId: string): string {
 		return this.sessions.getSessionDir(slug, sessionRecordId);
 	}

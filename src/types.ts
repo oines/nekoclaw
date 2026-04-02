@@ -298,6 +298,7 @@ export interface ChannelSessionAddress {
 export interface ChannelPollCallbacks {
 	onEvent: (event: InboundMessageEvent) => Promise<void> | void;
 	onError?: (error: Error) => void;
+	onHealthy?: () => void;
 }
 
 export interface ChannelSendInput {
@@ -457,7 +458,7 @@ export interface PreparedPersonaContext {
 export interface RuntimeDirectoryContactSnapshot {
 	account: string;
 	displayName?: string;
-	channel: ChannelType;
+	channel: "telegram" | "qq";
 	lastSeenAt: string;
 	pairedSessionKey?: string;
 	sourceHints: string[];
@@ -466,7 +467,7 @@ export interface RuntimeDirectoryContactSnapshot {
 export interface RuntimeDirectoryGroupSnapshot {
 	groupRef: string;
 	title?: string;
-	channel: ChannelType;
+	channel: "telegram" | "qq";
 	lastSeenAt: string;
 	pairedSessionKey?: string;
 }
@@ -482,7 +483,7 @@ export interface RuntimeDirectorySnapshot {
 	contacts: RuntimeDirectoryContactSnapshot[];
 	groups: RuntimeDirectoryGroupSnapshot[];
 	groupMembers: Record<string, RuntimeDirectoryGroupMemberSnapshot[]>;
-	availableChannels: ChannelType[];
+	availableChannels: Array<"telegram" | "qq">;
 }
 
 export interface WorkerPayload {

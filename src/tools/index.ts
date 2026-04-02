@@ -25,19 +25,19 @@ const MessageToolParameters = Type.Object({
 	attachments: Type.Optional(Type.Array(AttachmentSchema)),
 });
 const ListContactsParameters = Type.Object({
-	channel: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("napcat")])),
+	channel: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("qq")])),
 });
 const ListGroupsParameters = Type.Object({
-	channel: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("napcat")])),
+	channel: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("qq")])),
 });
 const GetGroupMembersParameters = Type.Object({
-	groupRef: Type.String({ description: "Explicit group ref like telegram:group:-1001 or napcat:group:123456." }),
+	groupRef: Type.String({ description: "Explicit group ref like telegram:group:-1001 or qq:group:123456." }),
 });
 const GetContactDetailParameters = Type.Object({
-	account: Type.String({ description: "Explicit contact ref like telegram:dm:12345 or napcat:dm:67890." }),
+	account: Type.String({ description: "Explicit contact ref like telegram:dm:12345 or qq:dm:67890." }),
 });
 const SendMessageParameters = Type.Object({
-	target: Type.String({ description: "Explicit target ref like telegram:dm:12345 or napcat:group:67890." }),
+	target: Type.String({ description: "Explicit target ref like telegram:dm:12345 or qq:group:67890." }),
 	text: Type.Optional(Type.String()),
 	attachments: Type.Optional(Type.Array(AttachmentSchema)),
 });
@@ -71,7 +71,7 @@ function normalizeAttachments(attachments: MessageToolInput["attachments"]): Out
 
 function failUnknownTarget(target: string): never {
 	throw new Error(
-		`Unknown target "${target}". Use list_contacts or list_groups first and pass an explicit ref like telegram:dm:123 or napcat:group:456.`,
+		`Unknown target "${target}". Use list_contacts or list_groups first and pass an explicit ref like telegram:dm:123 or qq:group:456.`,
 	);
 }
 
@@ -220,7 +220,7 @@ function createGetGroupMembersTool(context: ChannelToolContext): ToolDefinition 
 			const input = params as GetGroupMembersInput;
 			const parsed = parseTargetRef(input.groupRef);
 			if (!parsed || parsed.chatKind !== "group") {
-				throw new Error("groupRef must look like telegram:group:<id> or napcat:group:<id>");
+				throw new Error("groupRef must look like telegram:group:<id> or qq:group:<id>");
 			}
 			const group = context.runtimeDirectory.groups.find((entry) => entry.groupRef === input.groupRef);
 			if (!group) {
@@ -247,7 +247,7 @@ function createGetContactDetailTool(context: ChannelToolContext): ToolDefinition
 			const input = params as GetContactDetailInput;
 			const parsed = parseTargetRef(input.account);
 			if (!parsed || parsed.chatKind !== "dm") {
-				throw new Error("account must look like telegram:dm:<id> or napcat:dm:<id>");
+				throw new Error("account must look like telegram:dm:<id> or qq:dm:<id>");
 			}
 			const contact = context.runtimeDirectory.contacts.find((entry) => entry.account === input.account);
 			if (!contact) {
@@ -269,7 +269,7 @@ function createSendMessageTool(context: ChannelToolContext): ToolDefinition {
 		promptSnippet:
 			"send_message(target, text?, attachments?): proactively message another runtime-known contact or group. Use this instead of message(...) for cross-target outreach.",
 		promptGuidelines: [
-			"Use send_message only with explicit target refs like telegram:dm:123 or napcat:group:456.",
+				"Use send_message only with explicit target refs like telegram:dm:123 or qq:group:456.",
 			"Use list_contacts or list_groups first if you are not sure which target ref to use.",
 			"send_message is for proactive outreach to a different contact or group. For the current session, either respond in plain text or use message(...) for advanced current-session actions.",
 		],
@@ -282,7 +282,7 @@ function createSendMessageTool(context: ChannelToolContext): ToolDefinition {
 			}
 			const parsed = parseTargetRef(input.target);
 			if (!parsed) {
-				throw new Error("target must look like telegram:dm:<id>, telegram:group:<id>, napcat:dm:<id>, or napcat:group:<id>");
+					throw new Error("target must look like telegram:dm:<id>, telegram:group:<id>, qq:dm:<id>, or qq:group:<id>");
 			}
 			const isKnownTarget =
 				parsed.chatKind === "dm"
@@ -315,15 +315,15 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 		promptSnippet:
 			"session_status(): inspect the current session, channel capabilities, and reply behavior before using message actions.",
 		parameters: SessionStatusParameters,
-		execute: async () => {
-			const summary = {
-				sessionKey: context.session.sessionKey,
-				externalConversationId: context.session.externalConversationId,
-				chatKind: context.session.chatKind,
-				channelType: context.session.channelType,
-				capabilities: context.capabilities,
-				inboundMessageId: context.event.messageId,
-				replyToMessageId: context.event.replyToMessageId,
+			execute: async () => {
+				const summary = {
+					sessionKey: context.session.sessionKey,
+					externalConversationId: context.session.externalConversationId,
+					chatKind: context.session.chatKind,
+					channelType: context.session.channelType === "napcat" ? "qq" : context.session.channelType,
+					capabilities: context.capabilities,
+					inboundMessageId: context.event.messageId,
+					replyToMessageId: context.event.replyToMessageId,
 				availableChannels: context.runtimeDirectory.availableChannels,
 			};
 			return {

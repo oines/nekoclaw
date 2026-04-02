@@ -198,9 +198,41 @@ describe("nekoclaw daemon", () => {
 		store.setChannelToken(agent.agentId, "telegram", "token");
 		store.updateAgent(agent.agentId, { enabled: true });
 
+			const daemon = new NekoclawDaemon(store);
+			await expect(daemon.start()).resolves.toBeUndefined();
+			expect(store.getAgentByRef(agent.agentId).lastError).toBe("telegram startup boom");
+			await daemon.stop();
+		});
+
+	it("queues dream only for idle agents and records busy skips for agents already processing", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { NekoclawDaemon } = await import("../src/runtime/daemon.js");
+		const store = new JsonNekoclawStore();
+
+		const idleAgent = store.createAgent({ slug: "idle-dream-cat" });
+		const busyAgent = store.createAgent({ slug: "busy-dream-cat" });
 		const daemon = new NekoclawDaemon(store);
-		await expect(daemon.start()).resolves.toBeUndefined();
-		expect(store.getAgentByRef(agent.agentId).lastError).toBe("telegram startup boom");
-		await daemon.stop();
+		const daemonState = daemon as unknown as {
+			processingAgents: Set<string>;
+			personaMemory: {
+				queueBacklogSweep(agent: { agentId: string }): void;
+				queueDream(agent: { agentId: string }): void;
+				noteDreamSkip(agent: { agentId: string }, reason: "agent_busy"): void;
+			};
+			queuePersonaBacklogSweeps(): void;
+		};
+		daemonState.processingAgents.add(busyAgent.agentId);
+		const backlogSpy = vi.spyOn(daemonState.personaMemory, "queueBacklogSweep");
+		const dreamSpy = vi.spyOn(daemonState.personaMemory, "queueDream");
+		const skipSpy = vi.spyOn(daemonState.personaMemory, "noteDreamSkip");
+
+		daemonState.queuePersonaBacklogSweeps();
+
+		expect(backlogSpy).toHaveBeenCalledTimes(1);
+		expect(backlogSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId: idleAgent.agentId }));
+		expect(dreamSpy).toHaveBeenCalledTimes(1);
+		expect(dreamSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId: idleAgent.agentId }));
+		expect(skipSpy).toHaveBeenCalledTimes(1);
+		expect(skipSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId: busyAgent.agentId }), "agent_busy");
 	});
-});
+	});

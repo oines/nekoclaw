@@ -16,6 +16,18 @@ export interface HarnessReplyJudgeResult {
 	raw: string;
 }
 
+export interface HarnessArtifactJudgeSpec {
+	title: string;
+	expectations: string[];
+	failureSignals: string[];
+}
+
+export interface HarnessArtifactJudgeResult {
+	verdict: "pass" | "fail";
+	reason: string;
+	raw: string;
+}
+
 function extractResponseText(response: Awaited<ReturnType<typeof complete>>): string {
 	return response.content
 		.filter((block): block is Extract<(typeof response.content)[number], { type: "text" }> => block.type === "text")
@@ -84,6 +96,48 @@ export async function judgeHarnessReply(
 	const response = await complete(model, context, apiKey ? { apiKey } : undefined);
 	const raw = extractResponseText(response);
 	const parsed = JSON.parse(extractJsonObject(raw)) as Partial<HarnessReplyJudgeResult>;
+	if (parsed.verdict !== "pass" && parsed.verdict !== "fail") {
+		throw new Error(`Harness judge returned invalid verdict: ${raw}`);
+	}
+	return {
+		verdict: parsed.verdict,
+		reason: parsed.reason?.trim() || "No reason provided",
+		raw,
+	};
+}
+
+export async function judgeHarnessArtifacts(
+	store: JsonNekoclawStore,
+	agent: AgentSpec,
+	input: {
+		spec: HarnessArtifactJudgeSpec;
+		evidence: string;
+	},
+): Promise<HarnessArtifactJudgeResult> {
+	const { model, apiKey } = resolveJudgeModel(store, agent);
+	const context: Context = {
+		systemPrompt: [
+			"你是 Nekoclaw harness 的严格裁判。",
+			"你只根据给定的场景预期、失败信号和文件证据来裁决。",
+			"不要脑补未给出的事实。",
+			"输出必须是 JSON，格式为 {\"verdict\":\"pass|fail\",\"reason\":\"...\"}。",
+		].join("\n"),
+		messages: [
+			{
+				role: "user",
+				content: [
+					`场景：${input.spec.title}`,
+					`预期：\n${input.spec.expectations.map((item) => `- ${item}`).join("\n")}`,
+					`不通过表现：\n${input.spec.failureSignals.map((item) => `- ${item}`).join("\n")}`,
+					`文件证据：\n${input.evidence}`,
+				].join("\n\n"),
+				timestamp: Date.now(),
+			},
+		],
+	};
+	const response = await complete(model, context, apiKey ? { apiKey } : undefined);
+	const raw = extractResponseText(response);
+	const parsed = JSON.parse(extractJsonObject(raw)) as Partial<HarnessArtifactJudgeResult>;
 	if (parsed.verdict !== "pass" && parsed.verdict !== "fail") {
 		throw new Error(`Harness judge returned invalid verdict: ${raw}`);
 	}

@@ -12,6 +12,10 @@ import type {
 	SessionRecord,
 } from "../types.js";
 
+function toExposedChannel(channel: ChannelType): "telegram" | "qq" {
+	return channel === "napcat" ? "qq" : "telegram";
+}
+
 type KnownLogEvent = Partial<InboundMessageEvent> & { timestamp?: string; type?: string; channel?: string };
 
 function normalizeRefId(value: string): string {
@@ -19,20 +23,21 @@ function normalizeRefId(value: string): string {
 }
 
 export function buildContactRef(channel: ChannelType, externalUserId: string): string {
-	return `${channel}:dm:${normalizeRefId(externalUserId)}`;
+	return `${toExposedChannel(channel)}:dm:${normalizeRefId(externalUserId)}`;
 }
 
 export function buildGroupRef(channel: ChannelType, externalConversationId: string): string {
-	return `${channel}:group:${normalizeRefId(externalConversationId)}`;
+	return `${toExposedChannel(channel)}:group:${normalizeRefId(externalConversationId)}`;
 }
 
 export function parseTargetRef(value: string): { channelType: ChannelType; chatKind: "dm" | "group"; externalConversationId: string } | undefined {
-	const match = value.trim().match(/^(telegram|napcat):(dm|group):(.+)$/);
+	const match = value.trim().match(/^(telegram|qq|napcat):(dm|group):(.+)$/);
 	if (!match?.[1] || !match[2] || !match[3]) {
 		return undefined;
 	}
+	const channel = match[1] === "qq" ? "napcat" : (match[1] as ChannelType);
 	return {
-		channelType: match[1] as ChannelType,
+		channelType: channel,
 		chatKind: match[2] as "dm" | "group",
 		externalConversationId: normalizeRefId(match[3]),
 	};
@@ -108,9 +113,9 @@ function addCurrentEvent(
 ): void {
 	if (event.sender.externalId) {
 		upsertContact(contacts, {
-			account: buildContactRef(event.channelType, event.sender.externalId),
-			displayName: event.sender.displayName,
-			channel: event.channelType,
+				account: buildContactRef(event.channelType, event.sender.externalId),
+				displayName: event.sender.displayName,
+				channel: toExposedChannel(event.channelType),
 			lastSeenAt: event.occurredAt,
 			pairedSessionKey: event.chatKind === "dm" ? session.sessionKey : undefined,
 			sourceHints: [event.chatKind === "dm" ? "seen_in_dm" : "seen_in_group"],
@@ -121,7 +126,7 @@ function addCurrentEvent(
 		upsertGroup(groups, {
 			groupRef,
 			title: event.chatTitle,
-			channel: event.channelType,
+			channel: toExposedChannel(event.channelType),
 			lastSeenAt: event.occurredAt,
 			pairedSessionKey: session.sessionKey,
 		});
@@ -143,17 +148,17 @@ function addSession(
 ): void {
 	if (session.chatKind === "dm") {
 		upsertContact(contacts, {
-			account: buildContactRef(session.channelType, session.externalConversationId),
-			channel: session.channelType,
+				account: buildContactRef(session.channelType, session.externalConversationId),
+				channel: toExposedChannel(session.channelType),
 			lastSeenAt: session.updatedAt,
 			pairedSessionKey: session.sessionKey,
 			sourceHints: ["paired_session"],
 		});
 		return;
 	}
-	upsertGroup(groups, {
-		groupRef: buildGroupRef(session.channelType, session.externalConversationId),
-		channel: session.channelType,
+		upsertGroup(groups, {
+			groupRef: buildGroupRef(session.channelType, session.externalConversationId),
+			channel: toExposedChannel(session.channelType),
 		lastSeenAt: session.updatedAt,
 		pairedSessionKey: session.sessionKey,
 	});
@@ -166,19 +171,19 @@ function addPair(
 ): void {
 	if (pair.chatKind === "dm") {
 		upsertContact(contacts, {
-			account: buildContactRef(pair.channelType, pair.externalConversationId),
-			displayName: pair.senderName,
-			channel: pair.channelType,
+				account: buildContactRef(pair.channelType, pair.externalConversationId),
+				displayName: pair.senderName,
+				channel: toExposedChannel(pair.channelType),
 			lastSeenAt: pair.updatedAt,
 			pairedSessionKey: pair.status === "accepted" ? pair.sessionKey : undefined,
 			sourceHints: [pair.status === "pending" ? "pair_request" : "paired_session"],
 		});
 		return;
 	}
-	upsertGroup(groups, {
-		groupRef: buildGroupRef(pair.channelType, pair.externalConversationId),
-		title: pair.chatTitle,
-		channel: pair.channelType,
+		upsertGroup(groups, {
+			groupRef: buildGroupRef(pair.channelType, pair.externalConversationId),
+			title: pair.chatTitle,
+			channel: toExposedChannel(pair.channelType),
 		lastSeenAt: pair.updatedAt,
 		pairedSessionKey: pair.status === "accepted" ? pair.sessionKey : undefined,
 	});
@@ -200,9 +205,9 @@ function addLogEntry(
 	const chatTitle = typeof entry.chatTitle === "string" ? entry.chatTitle : undefined;
 	if (senderId) {
 		upsertContact(contacts, {
-			account: buildContactRef(eventChannel, senderId),
-			displayName: senderName,
-			channel: eventChannel,
+				account: buildContactRef(eventChannel, senderId),
+				displayName: senderName,
+				channel: toExposedChannel(eventChannel),
 			lastSeenAt: occurredAt,
 			pairedSessionKey: chatKind === "dm" ? session.sessionKey : undefined,
 			sourceHints: [chatKind === "dm" ? "seen_in_dm" : "seen_in_group"],
@@ -210,10 +215,10 @@ function addLogEntry(
 	}
 	if (chatKind === "group") {
 		const groupRef = buildGroupRef(eventChannel, chatId);
-		upsertGroup(groups, {
-			groupRef,
-			title: chatTitle,
-			channel: eventChannel,
+			upsertGroup(groups, {
+				groupRef,
+				title: chatTitle,
+				channel: toExposedChannel(eventChannel),
 			lastSeenAt: occurredAt,
 			pairedSessionKey: session.sessionKey,
 		});
@@ -261,7 +266,7 @@ export class RuntimeDirectoryService {
 						Array.from(members.values()).sort((left, right) => left.account.localeCompare(right.account)),
 					]),
 			),
-			availableChannels: this.store.listChannels(agent.agentId).map((channel) => channel.type).sort(),
-		};
+				availableChannels: this.store.listChannels(agent.agentId).map((channel) => toExposedChannel(channel.type)).sort(),
+			};
+		}
 	}
-}

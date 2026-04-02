@@ -54,14 +54,14 @@ function createPayload(channelType: "telegram" | "napcat"): WorkerPayload {
 			delete: true,
 			typing: channelType === "telegram",
 		},
-		runtimeDirectory: {
-			contacts: [],
-			groups: [],
-			groupMembers: {},
-			availableChannels: [channelType],
-		},
-	};
-}
+			runtimeDirectory: {
+				contacts: [],
+				groups: [],
+				groupMembers: {},
+				availableChannels: [channelType === "napcat" ? "qq" : "telegram"],
+			},
+		};
+	}
 
 describe("worker append prompt", () => {
 	it("includes matched telegram handles when present", () => {

@@ -242,6 +242,14 @@ export class AgentStore {
 		return this.paths.getPersonaObservationPath(slug, sceneRef);
 	}
 
+	getPersonaControlDir(slug: string): string {
+		return this.paths.getPersonaControlDir(slug);
+	}
+
+	getPersonaDreamStatePath(slug: string): string {
+		return this.paths.getPersonaDreamStatePath(slug);
+	}
+
 	getSkillsDir(slug: string): string {
 		return this.paths.getSkillsDir(slug);
 	}
@@ -255,11 +263,12 @@ export class AgentStore {
 		ensureDir(root);
 		ensureDir(this.paths.getSkillsDir(agent.slug));
 		ensureDir(this.paths.getRuntimeAgentDir(agent.slug));
-		ensureDir(this.paths.getPersonaDir(agent.slug));
-		ensureDir(this.paths.getPersonaPeopleDir(agent.slug));
-		ensureDir(this.paths.getPersonaScenesDir(agent.slug));
-		ensureDir(this.paths.getPersonaObservationsDir(agent.slug));
-		ensureDir(join(root, "chats"));
+			ensureDir(this.paths.getPersonaDir(agent.slug));
+			ensureDir(this.paths.getPersonaPeopleDir(agent.slug));
+			ensureDir(this.paths.getPersonaScenesDir(agent.slug));
+			ensureDir(this.paths.getPersonaObservationsDir(agent.slug));
+			ensureDir(this.paths.getPersonaControlDir(agent.slug));
+			ensureDir(join(root, "chats"));
 
 		if (!existsSync(this.paths.getSoulPath(agent.slug))) {
 			writeTextFile(this.paths.getSoulPath(agent.slug), defaultSoul(agent));

@@ -43,13 +43,13 @@ const runtimeDirectory: RuntimeDirectorySnapshot = {
 			pairedSessionKey: session.sessionKey,
 			sourceHints: ["seen_in_dm"],
 		},
-		{
-			account: "napcat:dm:456",
-			displayName: "Bob",
-			channel: "napcat",
-			lastSeenAt: "2026-03-29T00:05:00.000Z",
-			sourceHints: ["pair_request"],
-		},
+			{
+				account: "qq:dm:456",
+				displayName: "Bob",
+				channel: "qq",
+				lastSeenAt: "2026-03-29T00:05:00.000Z",
+				sourceHints: ["pair_request"],
+			},
 	],
 	groups: [
 		{
@@ -69,7 +69,7 @@ const runtimeDirectory: RuntimeDirectorySnapshot = {
 			},
 		],
 	},
-	availableChannels: ["napcat", "telegram"],
+		availableChannels: ["qq", "telegram"],
 };
 
 function createContext(input: {
@@ -210,7 +210,7 @@ describe("tool composition", () => {
 		await sendMessageTool?.execute(
 			"tool-send-targeted",
 			{
-				target: "napcat:dm:456",
+					target: "qq:dm:456",
 				text: "ping from proactive send",
 			},
 			undefined,
@@ -221,7 +221,7 @@ describe("tool composition", () => {
 		expect(actions).toEqual([
 			{
 				kind: "send_targeted",
-				target: "napcat:dm:456",
+					target: "qq:dm:456",
 				payload: {
 					text: "ping from proactive send",
 					attachments: undefined,

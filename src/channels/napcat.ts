@@ -51,6 +51,21 @@ const NAPCAT_MESSAGE_EVENTS: NapcatMessageEventName[] = [
 const WS_OPEN = 1;
 const NAPCAT_DOWNLOAD_THREAD_COUNT = 2;
 const DEFAULT_GROUP_TRIGGER: GroupTriggerMode = "all";
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
+const NAPCAT_CONNECTION_EVENTS = ["close", "disconnect", "socket.close", "ws.close"] as const;
+const MIN_SEND_DELAY_MS = 1_000;
+const MAX_SEND_DELAY_MS = 3_000;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
+}
+
+function getRandomSendDelayMs(): number {
+	const spread = MAX_SEND_DELAY_MS - MIN_SEND_DELAY_MS + 1;
+	return MIN_SEND_DELAY_MS + Math.floor(Math.random() * spread);
+}
 
 function isFileSegment(segment: Segment.TSegment): segment is Segment.TSegment & FileSegmentLike {
 	return (segment as FileSegmentLike).type === "file";
@@ -306,22 +321,29 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 	readonly botIdentity: { username?: string; userId: string };
 
 	private running = false;
+	private listenersRegistered = false;
 	private connectPromise: Promise<void> | undefined;
+	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	private reconnectAttempts = 0;
+	private sawConnectionFailure = false;
+	private reconnectAfterConnect = false;
+	private sendGeneration = 0;
+	private callbacks: ChannelPollCallbacks | undefined;
 	private readonly client: NapcatClientLike;
 
-	constructor(
-		private readonly channel: ChannelSpec,
-		options: {
-			wsUrl: string;
-			accessToken?: string;
-			selfId: string;
-		},
-		replyModes?: Partial<Record<ChatKind, ReplyMode>>,
-		private readonly groupTrigger: GroupTriggerMode = DEFAULT_GROUP_TRIGGER,
-		runtime?: { client?: NapcatClientLike },
-	) {
-		this.replyModes = replyModes ?? {};
-		this.client = runtime?.client ??
+		constructor(
+			private readonly channel: ChannelSpec,
+			options: {
+				wsUrl: string;
+				accessToken?: string;
+				selfId: string;
+			},
+			replyModes?: Partial<Record<ChatKind, ReplyMode>>,
+			private readonly groupTrigger: GroupTriggerMode = DEFAULT_GROUP_TRIGGER,
+			runtime?: { client?: NapcatClientLike; sendDelayMs?: () => number },
+		) {
+			this.replyModes = replyModes ?? {};
+			this.client = runtime?.client ??
 			(new Client(Number.parseInt(options.selfId, 10), {
 				websocket_address: options.wsUrl,
 				accent_token: options.accessToken,
@@ -330,14 +352,16 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 					skip_logo: true,
 				},
 			}) as unknown as NapcatClientLike);
-		this.selfId = options.selfId;
-		this.botIdentity = { userId: options.selfId };
-		this.threading = createThreadingAdapter(this.replyModes);
-		this.outbound = createOutboundAdapter(this.capabilities, this.actions, this.threading);
-	}
+			this.selfId = options.selfId;
+			this.botIdentity = { userId: options.selfId };
+			this.getSendDelayMs = runtime?.sendDelayMs ?? getRandomSendDelayMs;
+			this.threading = createThreadingAdapter(this.replyModes);
+			this.outbound = createOutboundAdapter(this.capabilities, this.actions, this.threading);
+		}
 
 	private readonly replyModes: Partial<Record<ChatKind, ReplyMode>>;
 	private readonly selfId: string;
+	private readonly getSendDelayMs: () => number;
 
 	resolveSessionAddress(event: InboundMessageEvent) {
 		return {
@@ -348,25 +372,13 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 	}
 
 	startPolling(callbacks: ChannelPollCallbacks): void {
+		this.callbacks = callbacks;
+		this.ensureListeners();
 		if (this.running) {
 			return;
 		}
 		this.running = true;
-		for (const eventName of NAPCAT_MESSAGE_EVENTS) {
-			this.client.on(eventName, async (message) => {
-				const event = mapNapcatMessageToEvent(message as NapcatMessageEvent, this.selfId);
-				if (event) {
-					await callbacks.onEvent(event);
-				}
-			});
-		}
-		this.client.on("error", (event) => {
-			callbacks.onError?.(this.toError(event));
-		});
-		void this.ensureConnected().catch((error) => {
-			this.running = false;
-			callbacks.onError?.(error instanceof Error ? error : new Error(String(error)));
-		});
+		void this.ensureConnected().catch(() => undefined);
 	}
 
 	stop(): void {
@@ -375,6 +387,10 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		}
 		this.running = false;
 		this.connectPromise = undefined;
+		this.clearReconnectTimer();
+		this.reconnectAttempts = 0;
+		this.sawConnectionFailure = false;
+		this.sendGeneration += 1;
 		this.client.Disconnect();
 	}
 
@@ -419,17 +435,118 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		if (this.connectPromise) {
 			return this.connectPromise;
 		}
+		this.clearReconnectTimer();
+		return this.beginConnect();
+	}
+
+	private ensureListeners(): void {
+		if (this.listenersRegistered) {
+			return;
+		}
+		this.listenersRegistered = true;
+		for (const eventName of NAPCAT_MESSAGE_EVENTS) {
+			this.client.on(eventName, async (message) => {
+				const event = mapNapcatMessageToEvent(message as NapcatMessageEvent, this.selfId);
+				if (event) {
+					await this.callbacks?.onEvent(event);
+				}
+			});
+		}
+		this.client.on("error", (event) => {
+			this.callbacks?.onError?.(this.toError(event));
+		});
+		for (const eventName of NAPCAT_CONNECTION_EVENTS) {
+			this.client.on(eventName, (event) => {
+				this.handleConnectionLoss(eventName, event);
+			});
+		}
+	}
+
+	private async beginConnect(): Promise<void> {
 		if (this.client.connection && this.client.connection.readyState !== WS_OPEN) {
 			this.client.Disconnect();
 		}
-		this.connectPromise = this.client.Start().then(() => undefined).finally(() => {
-			this.connectPromise = undefined;
-		});
+		this.connectPromise = this.client.Start()
+			.then(() => {
+				this.clearReconnectTimer();
+				this.reconnectAttempts = 0;
+				if (this.sawConnectionFailure) {
+					this.sawConnectionFailure = false;
+					this.callbacks?.onHealthy?.();
+				}
+			})
+			.catch((error) => {
+				const normalized = error instanceof Error ? error : new Error(String(error));
+				this.sawConnectionFailure = true;
+				this.reconnectAfterConnect = true;
+				this.callbacks?.onError?.(normalized);
+				throw normalized;
+			})
+			.finally(() => {
+				this.connectPromise = undefined;
+				if (this.reconnectAfterConnect) {
+					this.reconnectAfterConnect = false;
+					if (this.running && !this.isConnectionOpen()) {
+						this.scheduleReconnect();
+					}
+				}
+			});
 		return this.connectPromise;
 	}
 
 	private isConnectionOpen(): boolean {
 		return this.client.connection?.readyState === WS_OPEN;
+	}
+
+	private handleConnectionLoss(reason: string, event: unknown): void {
+		if (!this.running || this.reconnectTimer) {
+			return;
+		}
+		if (this.isConnectionOpen()) {
+			return;
+		}
+		this.sawConnectionFailure = true;
+		this.callbacks?.onError?.(this.toError({ message: `NapCat connection lost (${reason})`, error: event }));
+		if (this.connectPromise) {
+			this.reconnectAfterConnect = true;
+			return;
+		}
+		this.scheduleReconnect();
+	}
+
+	private scheduleReconnect(): void {
+		if (!this.running || this.connectPromise || this.reconnectTimer || this.isConnectionOpen()) {
+			return;
+		}
+		this.sawConnectionFailure = true;
+		const delay = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempts, RECONNECT_DELAYS_MS.length - 1)];
+		this.reconnectAttempts += 1;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			if (!this.running || this.isConnectionOpen() || this.connectPromise) {
+				return;
+			}
+			void this.beginConnect().catch(() => undefined);
+		}, delay);
+	}
+
+	private clearReconnectTimer(): void {
+		if (!this.reconnectTimer) {
+			return;
+		}
+		clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = undefined;
+	}
+
+	private async waitBeforeSend(): Promise<void> {
+		const generation = this.sendGeneration;
+		const delayMs = this.getSendDelayMs();
+		if (delayMs > 0) {
+			await sleep(delayMs);
+		}
+		if (generation !== this.sendGeneration) {
+			throw new Error("NapCat send cancelled because the plugin stopped");
+		}
 	}
 
 	private toError(event: unknown): Error {
@@ -525,6 +642,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 			const refs: ChannelMessageRef[] = [];
 			let first = true;
 			for (const attachment of payload.attachments) {
+				await this.waitBeforeSend();
 				const messageId = await this.sendMessage(
 					chatId,
 					chatKind,
@@ -541,6 +659,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		if (!payload.text?.trim()) {
 			return [];
 		}
+		await this.waitBeforeSend();
 		const messageId = await this.sendMessage(chatId, chatKind, toTextElements(payload.text, replyToId));
 		return [
 			{
@@ -551,15 +670,22 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 	}
 
 	private async sendMessage(chatId: string, chatKind: ChatKind, message: TElements): Promise<unknown> {
-		return chatKind === "group"
-			? this.client.CallApi("send_group_msg", {
-					group_id: Number.parseInt(chatId, 10),
-					message,
-				})
-			: this.client.CallApi("send_private_msg", {
-					user_id: Number.parseInt(chatId, 10),
-					message,
-				});
+		try {
+			return await (chatKind === "group"
+				? this.client.CallApi("send_group_msg", {
+						group_id: Number.parseInt(chatId, 10),
+						message,
+					})
+				: this.client.CallApi("send_private_msg", {
+						user_id: Number.parseInt(chatId, 10),
+						message,
+					}));
+		} catch (error) {
+			if (!this.isConnectionOpen()) {
+				this.handleConnectionLoss("send", error);
+			}
+			throw error;
+		}
 	}
 }
 
@@ -572,7 +698,7 @@ export function createNapcatChannelPlugin(
 	},
 	replyModes?: Partial<Record<ChatKind, ReplyMode>>,
 	groupTrigger?: GroupTriggerMode,
-	runtime?: { client?: NapcatClientLike },
+	runtime?: { client?: NapcatClientLike; sendDelayMs?: () => number },
 ): NapcatChannelPlugin {
 	return new NapcatChannelPlugin(channel, options, replyModes, groupTrigger, runtime);
 }
