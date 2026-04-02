@@ -7,5 +7,7 @@ export { createTelegramChannelPlugin, mapTelegramMessageToEvent, TelegramChannel
 export { JsonNekoclawStore } from "./store/json-store.js";
 export { NekoclawDaemon } from "./runtime/daemon.js";
 export { runWorker, runWorkerFromStdin } from "./runtime/worker.js";
+export { runInternalChatHarness } from "./internal/chat-harness.js";
+export { PERSONA_HARNESS_SCENARIOS, runPersonaHarness } from "./internal/persona-harness.js";
 export { createNekoclawTools, createToolComposition } from "./tools/index.js";
 export { runNekoclawCommand } from "./cli/commands.js";

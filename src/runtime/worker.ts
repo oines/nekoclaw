@@ -80,6 +80,31 @@ export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: 
 			? "- The current inbound message was already matched as being addressed to you by the routing layer."
 			: undefined,
 	].filter(Boolean);
+	const personaSections = payload.personaContext
+		? [
+				payload.personaContext.selectionNotes
+					? `## Persona Selection Notes
+${payload.personaContext.selectionNotes}`
+					: "",
+				payload.personaContext.indexMarkdown
+					? `## Persona Index
+${payload.personaContext.indexMarkdown}`
+					: "",
+				(payload.personaContext.selectedMemories?.length ?? 0) > 0
+					? `## Selected Persona Memories
+${payload.personaContext.selectedMemories
+	.map((memoryDoc) => `### ${memoryDoc.path}
+${memoryDoc.content}`)
+	.join("\n\n")}`
+					: "",
+				payload.personaContext.sceneObservations
+					? `## Current Scene Observations
+${payload.personaContext.sceneObservations}`
+					: "",
+			]
+				.filter(Boolean)
+				.join("\n\n")
+		: "";
 	return `## Nekoclaw Workspace Contract
 - You are replying inside a single paired session.
 - Do not assume access to any other session.
@@ -91,9 +116,15 @@ export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: 
 🟢 IMPORTANT FOR RESPONDING:
 - To reply normally to the user, JUST OUTPUT RAW TEXT directly.
 - DO NOT use the \`message\` tool for regular responses.
-- ONLY use the \`message\` tool when explicitly needing to edit, delete, targeted replyToId, or simulate typing.
+- ONLY use the \`message\` tool for advanced actions in the current session: explicit current-session send/reply/edit/delete/typing.
+- Use the \`send_message\` tool when you need to proactively message another known contact or group outside the current session.
 - Use the \`session_status\` tool to inspect current session capabilities before choosing a messaging action.
+- Use \`list_contacts\`, \`list_groups\`, \`get_group_members\`, and \`get_contact_detail\` to inspect the runtime-known directory snapshot.
 - Use the \`no_reply\` tool when the best action is to intentionally stay silent.
+- If Persona memory context is present, treat it as the authoritative memory substrate for people and past events.
+- The persona index is always-on high-level context; selected persona memories are detailed files that were loaded on demand.
+- Current Scene Observations are recent旁观记录. If you refer to them, make it explicit when you were only observing rather than participating.
+- Preserve uncertainty markers from the evidence ("可能", "应该", etc.) instead of upgrading them into certainty.
 ${hasCurrentImages
 	? `- The current inbound message includes image content. If the user asks what is in the image, answer with direct visual facts first.
 - Do NOT use placeholder templates, bracketed fill-ins, canned admiration, or speculative scene descriptions.
@@ -107,6 +138,8 @@ ${hasCurrentImages
 - External conversation id: ${payload.currentSession.externalConversationId}
 - Parent session key: ${payload.currentSession.parentSessionKey ?? "(none)"}
 ${identityLines.length > 0 ? identityLines.join("\n") : ""}
+
+${personaSections}
 
 ## SOUL.md
 ${soul.trim() || "(empty)"}
@@ -237,6 +270,7 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 		session: payload.currentSession,
 		event: payload.job.event,
 		capabilities: payload.capabilities,
+		runtimeDirectory: payload.runtimeDirectory,
 		isExplicitlyAddressed: payload.selfIdentity?.isExplicitlyAddressed,
 		recordAction: (action: ChannelToolAction) => {
 			toolActions.push(action);

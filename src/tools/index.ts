@@ -1,5 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { codingTools, type ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { parseTargetRef } from "../runtime/runtime-directory.js";
 import type { ChannelToolContext, OutboundAttachment } from "../types.js";
 
 const AttachmentSchema = Type.Object({
@@ -23,11 +24,33 @@ const MessageToolParameters = Type.Object({
 	messageId: Type.Optional(Type.String({ description: "Existing message id for edit/delete actions." })),
 	attachments: Type.Optional(Type.Array(AttachmentSchema)),
 });
-
-type MessageToolInput = Static<typeof MessageToolParameters>;
+const ListContactsParameters = Type.Object({
+	channel: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("napcat")])),
+});
+const ListGroupsParameters = Type.Object({
+	channel: Type.Optional(Type.Union([Type.Literal("telegram"), Type.Literal("napcat")])),
+});
+const GetGroupMembersParameters = Type.Object({
+	groupRef: Type.String({ description: "Explicit group ref like telegram:group:-1001 or napcat:group:123456." }),
+});
+const GetContactDetailParameters = Type.Object({
+	account: Type.String({ description: "Explicit contact ref like telegram:dm:12345 or napcat:dm:67890." }),
+});
+const SendMessageParameters = Type.Object({
+	target: Type.String({ description: "Explicit target ref like telegram:dm:12345 or napcat:group:67890." }),
+	text: Type.Optional(Type.String()),
+	attachments: Type.Optional(Type.Array(AttachmentSchema)),
+});
 
 const SessionStatusParameters = Type.Object({});
 const NoReplyParameters = Type.Object({});
+
+type MessageToolInput = Static<typeof MessageToolParameters>;
+type ListContactsInput = Static<typeof ListContactsParameters>;
+type ListGroupsInput = Static<typeof ListGroupsParameters>;
+type GetGroupMembersInput = Static<typeof GetGroupMembersParameters>;
+type GetContactDetailInput = Static<typeof GetContactDetailParameters>;
+type SendMessageInput = Static<typeof SendMessageParameters>;
 
 function hasRenderableContent(text: string | undefined, attachments: OutboundAttachment[] | undefined): boolean {
 	return Boolean(text?.trim()) || Boolean(attachments?.length);
@@ -46,18 +69,26 @@ function normalizeAttachments(attachments: MessageToolInput["attachments"]): Out
 	}));
 }
 
+function failUnknownTarget(target: string): never {
+	throw new Error(
+		`Unknown target "${target}". Use list_contacts or list_groups first and pass an explicit ref like telegram:dm:123 or napcat:group:456.`,
+	);
+}
+
 function createMessageTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "message",
 		label: "Message",
-		description: "Advanced channel actions ONLY: edit, delete, or explicit reply to specific message ID.",
+		description: "Advanced current-session channel actions ONLY: current-session send/reply/edit/delete/typing.",
 		promptSnippet:
-			"message(action, text?, attachments?, replyToId?, messageId?): Use ONLY for explicit system replyToId/edit/delete/typing actions. DO NOT use for normal conversation responses.",
+			"message(action, text?, attachments?, replyToId?, messageId?): Use ONLY for current-session reply/edit/delete/typing or an explicit current-session send. Use send_message(target, ...) for cross-target outreach.",
 		promptGuidelines: [
 			"For normal conversational replies, JUST OUTPUT PLAIN TEXT directly. DO NOT invoke this tool.",
+			"Use message(action='send'|'reply') ONLY for the current session. Never use it to message some other contact or group.",
 			"Use message(action='reply') ONLY when you must explicitly reply to a specific previous message ID.",
 			"Use message(action='typing') to show typing while you prepare a longer answer.",
 			"Use message(action='edit'|'delete') with a concrete message id.",
+			"Use send_message(target, ...) when you need to proactively message another known contact or group.",
 		],
 		parameters: MessageToolParameters,
 		execute: async (_toolCallId, params) => {
@@ -139,6 +170,143 @@ function createMessageTool(context: ChannelToolContext): ToolDefinition {
 	};
 }
 
+function createListContactsTool(context: ChannelToolContext): ToolDefinition {
+	return {
+		name: "list_contacts",
+		label: "List Contacts",
+		description: "List known contacts from the runtime-known directory snapshot.",
+		promptSnippet:
+			"list_contacts(channel?): inspect known contacts already seen by the runtime before choosing a proactive messaging target.",
+		parameters: ListContactsParameters,
+		execute: async (_toolCallId, params) => {
+			const input = params as ListContactsInput;
+			const contacts = context.runtimeDirectory.contacts.filter((contact) => !input.channel || contact.channel === input.channel);
+			return {
+				content: [{ type: "text", text: JSON.stringify(contacts, null, 2) }],
+				details: { contacts },
+			};
+		},
+	};
+}
+
+function createListGroupsTool(context: ChannelToolContext): ToolDefinition {
+	return {
+		name: "list_groups",
+		label: "List Groups",
+		description: "List known groups from the runtime-known directory snapshot.",
+		promptSnippet:
+			"list_groups(channel?): inspect known groups already seen by the runtime before choosing a group target or member lookup.",
+		parameters: ListGroupsParameters,
+		execute: async (_toolCallId, params) => {
+			const input = params as ListGroupsInput;
+			const groups = context.runtimeDirectory.groups.filter((group) => !input.channel || group.channel === input.channel);
+			return {
+				content: [{ type: "text", text: JSON.stringify(groups, null, 2) }],
+				details: { groups },
+			};
+		},
+	};
+}
+
+function createGetGroupMembersTool(context: ChannelToolContext): ToolDefinition {
+	return {
+		name: "get_group_members",
+		label: "Group Members",
+		description: "Show known members for one known group ref from the runtime snapshot.",
+		promptSnippet:
+			"get_group_members(groupRef): inspect runtime-known members for a specific known group ref.",
+		parameters: GetGroupMembersParameters,
+		execute: async (_toolCallId, params) => {
+			const input = params as GetGroupMembersInput;
+			const parsed = parseTargetRef(input.groupRef);
+			if (!parsed || parsed.chatKind !== "group") {
+				throw new Error("groupRef must look like telegram:group:<id> or napcat:group:<id>");
+			}
+			const group = context.runtimeDirectory.groups.find((entry) => entry.groupRef === input.groupRef);
+			if (!group) {
+				failUnknownTarget(input.groupRef);
+			}
+			const members = context.runtimeDirectory.groupMembers[input.groupRef] ?? [];
+			return {
+				content: [{ type: "text", text: JSON.stringify({ group, members }, null, 2) }],
+				details: { group, members },
+			};
+		},
+	};
+}
+
+function createGetContactDetailTool(context: ChannelToolContext): ToolDefinition {
+	return {
+		name: "get_contact_detail",
+		label: "Contact Detail",
+		description: "Show runtime-known metadata for one known contact ref.",
+		promptSnippet:
+			"get_contact_detail(account): inspect one runtime-known contact before deciding whether to send a proactive message.",
+		parameters: GetContactDetailParameters,
+		execute: async (_toolCallId, params) => {
+			const input = params as GetContactDetailInput;
+			const parsed = parseTargetRef(input.account);
+			if (!parsed || parsed.chatKind !== "dm") {
+				throw new Error("account must look like telegram:dm:<id> or napcat:dm:<id>");
+			}
+			const contact = context.runtimeDirectory.contacts.find((entry) => entry.account === input.account);
+			if (!contact) {
+				failUnknownTarget(input.account);
+			}
+			return {
+				content: [{ type: "text", text: JSON.stringify(contact, null, 2) }],
+				details: contact,
+			};
+		},
+	};
+}
+
+function createSendMessageTool(context: ChannelToolContext): ToolDefinition {
+	return {
+		name: "send_message",
+		label: "Send Message",
+		description: "Send a proactive message to another known contact or group using an explicit target ref.",
+		promptSnippet:
+			"send_message(target, text?, attachments?): proactively message another runtime-known contact or group. Use this instead of message(...) for cross-target outreach.",
+		promptGuidelines: [
+			"Use send_message only with explicit target refs like telegram:dm:123 or napcat:group:456.",
+			"Use list_contacts or list_groups first if you are not sure which target ref to use.",
+			"send_message is for proactive outreach to a different contact or group. For the current session, either respond in plain text or use message(...) for advanced current-session actions.",
+		],
+		parameters: SendMessageParameters,
+		execute: async (_toolCallId, params) => {
+			const input = params as SendMessageInput;
+			const attachments = normalizeAttachments(input.attachments);
+			if (!hasRenderableContent(input.text, attachments)) {
+				throw new Error("send_message requires text or attachments");
+			}
+			const parsed = parseTargetRef(input.target);
+			if (!parsed) {
+				throw new Error("target must look like telegram:dm:<id>, telegram:group:<id>, napcat:dm:<id>, or napcat:group:<id>");
+			}
+			const isKnownTarget =
+				parsed.chatKind === "dm"
+					? context.runtimeDirectory.contacts.some((entry) => entry.account === input.target)
+					: context.runtimeDirectory.groups.some((entry) => entry.groupRef === input.target);
+			if (!isKnownTarget) {
+				failUnknownTarget(input.target);
+			}
+			context.recordAction({
+				kind: "send_targeted",
+				target: input.target,
+				payload: {
+					text: input.text,
+					attachments,
+				},
+			});
+			return {
+				content: [{ type: "text", text: `Queued a proactive message to ${input.target}.` }],
+				details: { kind: "send_targeted", target: input.target },
+			};
+		},
+	};
+}
+
 function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "session_status",
@@ -156,6 +324,7 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 				capabilities: context.capabilities,
 				inboundMessageId: context.event.messageId,
 				replyToMessageId: context.event.replyToMessageId,
+				availableChannels: context.runtimeDirectory.availableChannels,
 			};
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
@@ -184,7 +353,15 @@ function createNoReplyTool(context: ChannelToolContext): ToolDefinition {
 }
 
 export function createNekoclawTools(context: ChannelToolContext): ToolDefinition[] {
-	const tools = [createMessageTool(context), createSessionStatusTool(context)];
+	const tools = [
+		createMessageTool(context),
+		createListContactsTool(context),
+		createListGroupsTool(context),
+		createGetGroupMembersTool(context),
+		createGetContactDetailTool(context),
+		createSendMessageTool(context),
+		createSessionStatusTool(context),
+	];
 	if (shouldExposeNoReplyTool(context)) {
 		tools.push(createNoReplyTool(context));
 	}

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OutboundDispatchService } from "../src/runtime/outbound-dispatch.js";
-import type { AgentSpec, ChannelPlugin, ReplyPayload, SessionRecord } from "../src/types.js";
+import type { AgentSpec, ChannelPlugin, ChannelType, ReplyPayload, SessionRecord } from "../src/types.js";
 import { NEKOCLAW_CONTAINER_WORKSPACE_DIR } from "../src/config.js";
 
 describe("OutboundDispatchService path rebasing", () => {
@@ -28,7 +28,7 @@ describe("OutboundDispatchService path rebasing", () => {
 
 	const mockStore = {
 		getWorkspaceRoot: vi.fn().mockReturnValue("/host/workspaces/test-agent"),
-		getChannel: vi.fn().mockReturnValue({ type: "telegram" }),
+		getChannel: vi.fn((_agentId: string, channelType: ChannelType) => ({ type: channelType })),
 		audit: vi.fn(),
 		getAgentByRef: vi.fn().mockReturnValue(mockAgent),
 	};
@@ -54,7 +54,31 @@ describe("OutboundDispatchService path rebasing", () => {
 		resolveSessionAddress: vi.fn(),
 	};
 
-	const plugins = new Map<string, ChannelPlugin>([["agent-1:telegram", mockPlugin]]);
+	const mockNapcatPluginActions = {
+		send: vi.fn().mockResolvedValue([]),
+		reply: vi.fn().mockResolvedValue([]),
+		edit: vi.fn().mockResolvedValue(undefined),
+		delete: vi.fn().mockResolvedValue(undefined),
+		typing: vi.fn().mockResolvedValue(undefined),
+	};
+
+	const mockNapcatPlugin: ChannelPlugin = {
+		type: "napcat",
+		capabilities: { text: true, media: true, reply: true, edit: true, delete: true, typing: true },
+		actions: mockNapcatPluginActions,
+		outbound: {
+			send: vi.fn().mockResolvedValue([]),
+		},
+		threading: {} as any,
+		pairing: {} as any,
+		triggering: {} as any,
+		resolveSessionAddress: vi.fn(),
+	};
+
+	const plugins = new Map<string, ChannelPlugin>([
+		["agent-1:telegram", mockPlugin],
+		["agent-1:napcat", mockNapcatPlugin],
+	]);
 
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -112,6 +136,32 @@ describe("OutboundDispatchService path rebasing", () => {
 				}),
 			}),
 		);
+	});
+
+	it("dispatches send_targeted to the plugin that matches the explicit target ref", async () => {
+		const service = new OutboundDispatchService(mockStore as any, plugins);
+		const actions: any[] = [
+			{
+				kind: "send_targeted",
+				target: "napcat:group:8888",
+				payload: {
+					text: "hello group",
+					attachments: [{ kind: "file", filePath: "/workspace/docs/notes.txt" }],
+				},
+			},
+		];
+
+		await service.executeToolActions(mockAgent, mockSession, actions);
+
+		expect(mockNapcatPluginActions.send).toHaveBeenCalledWith({
+			chatId: "8888",
+			chatKind: "group",
+			payload: {
+				text: "hello group",
+				attachments: [{ kind: "file", filePath: "/host/workspaces/test-agent/docs/notes.txt" }],
+			},
+		});
+		expect(mockPluginActions.send).not.toHaveBeenCalled();
 	});
 
 	it("leaves non-container paths and URLs untouched", async () => {

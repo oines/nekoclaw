@@ -5,7 +5,19 @@ import { JsonNekoclawStore } from "../store/json-store.js";
 import type { AgentSpec, ChannelPlugin, RunJob, WorkerPayload, WorkerResult } from "../types.js";
 import { runWorkerInContainer } from "./docker.js";
 import { OutboundDispatchService } from "./outbound-dispatch.js";
+import { PersonaMemoryService } from "./persona-memory.js";
+import { RuntimeDirectoryService } from "./runtime-directory.js";
 import { getRuntimeKey } from "./runtime-key.js";
+
+function collectToolActionReplyText(result: WorkerResult): string {
+	return (result.toolActions ?? [])
+		.filter((action): action is Extract<NonNullable<WorkerResult["toolActions"]>[number], { kind: "send" | "reply" }> =>
+			action.kind === "send" || action.kind === "reply",
+		)
+		.map((action) => action.payload.text?.trim())
+		.filter((text): text is string => Boolean(text))
+		.join("\n\n");
+}
 
 function parseWorkerResult(stdout: string): WorkerResult {
 	const lines = stdout
@@ -25,12 +37,18 @@ function parseWorkerResult(stdout: string): WorkerResult {
 }
 
 export class WorkerRunnerService {
+	private readonly personaMemory: PersonaMemoryService;
+	private readonly runtimeDirectory: RuntimeDirectoryService;
+
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly outbound: OutboundDispatchService,
 		private readonly channelPlugins: Map<string, ChannelPlugin>,
 		private readonly ensureContainer: (agentRef: string) => Promise<string>,
-	) {}
+	) {
+		this.personaMemory = new PersonaMemoryService(store);
+		this.runtimeDirectory = new RuntimeDirectoryService(store);
+	}
 
 	async runJob(job: RunJob): Promise<WorkerResult> {
 		const agent = this.store.getAgentByRef(job.agentId);
@@ -38,11 +56,15 @@ export class WorkerRunnerService {
 		const effectiveModel = this.resolveEffectiveModel(agent, session, job);
 		await this.ensureContainer(agent.agentId);
 		const plugin = this.channelPlugins.get(getRuntimeKey(agent.agentId, session.channelType));
+		const personaContext = await this.personaMemory.buildPreparedContext(agent, session, job.event, effectiveModel);
+		const runtimeDirectory = this.runtimeDirectory.buildSnapshot(agent, session, job.event);
 		const payload: WorkerPayload = {
 			agent,
 			job,
 			currentSession: session,
 			capabilities: plugin?.capabilities ?? { text: true, media: false, reply: false, edit: false, delete: false, typing: false },
+			runtimeDirectory,
+			personaContext,
 			selfIdentity: this.getSelfIdentity(plugin, job),
 			effectiveModel,
 		};
@@ -65,6 +87,17 @@ export class WorkerRunnerService {
 			if (hasOutboundContent(result.outbound)) {
 				await this.outbound.sendToSession(agent, session, job.event, result.outbound);
 			}
+			const replyText = [result.outbound.text?.trim(), collectToolActionReplyText(result)]
+				.filter((value): value is string => Boolean(value))
+				.join("\n\n");
+			this.personaMemory.scheduleFormation({
+				agent,
+				session,
+				event: job.event,
+				replyText,
+				personaContext,
+				effectiveModel,
+			});
 			return result;
 		} finally {
 			if (typingInterval) {

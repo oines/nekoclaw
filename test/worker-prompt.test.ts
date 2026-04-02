@@ -54,6 +54,12 @@ function createPayload(channelType: "telegram" | "napcat"): WorkerPayload {
 			delete: true,
 			typing: channelType === "telegram",
 		},
+		runtimeDirectory: {
+			contacts: [],
+			groups: [],
+			groupMembers: {},
+			availableChannels: [channelType],
+		},
 	};
 }
 
@@ -70,6 +76,7 @@ describe("worker append prompt", () => {
 		const prompt = buildAppendPrompt(payload, "", "");
 		expect(prompt).toContain("You may be addressed in this session as: @mock_bot");
 		expect(prompt).toContain("already matched as being addressed to you");
+		expect(prompt).toContain("Use the `send_message` tool");
 	});
 
 	it("includes the configured platform user id for napcat", () => {
@@ -84,6 +91,30 @@ describe("worker append prompt", () => {
 		const prompt = buildAppendPrompt(payload, "", "");
 		expect(prompt).toContain("Your platform user id in this session: 1234567890");
 		expect(prompt).toContain("already matched as being addressed to you");
+	});
+
+	it("includes prepared persona context when available", () => {
+		const payload: WorkerPayload = {
+			...createPayload("telegram"),
+			personaContext: {
+				indexMarkdown: "## 我认识的人\n- 小王：毕业论文相关 → memory/people/telegram-111.md",
+				sceneObservations: "[2026-04-01T00:00:00.000Z] telegram:111 小王: 支付接口又挂了",
+				selectedMemories: [
+					{
+						path: "memory/people/telegram-111.md",
+						content: "小王之前提过毕业论文最近压力很大。",
+					},
+				],
+				selectionNotes: "Loaded the sender's detailed memory and the current scene notes.",
+			},
+		};
+
+		const prompt = buildAppendPrompt(payload, "", "");
+		expect(prompt).toContain("## Persona Selection Notes");
+		expect(prompt).toContain("## Persona Index");
+		expect(prompt).toContain("## Selected Persona Memories");
+		expect(prompt).toContain("memory/people/telegram-111.md");
+		expect(prompt).toContain("## Current Scene Observations");
 	});
 
 	it("collects hydrated image attachments as multimodal input", () => {

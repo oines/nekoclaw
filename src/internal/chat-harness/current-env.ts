@@ -25,6 +25,11 @@ import type {
 	WorkerResult,
 } from "../../types.js";
 import { FakeNapcatClient, FakeTelegramBot, type HarnessTranscriptEntry, createTelegramMessage } from "./fake-transports.js";
+import {
+	judgeHarnessReply,
+	type HarnessReplyJudgeResult,
+	type HarnessReplyJudgeSpec,
+} from "./judge.js";
 
 export type HarnessChannel = "telegram" | "napcat" | "both";
 
@@ -33,6 +38,7 @@ export interface InternalChatHarnessRunOptions {
 	channel?: HarnessChannel;
 	scenario?: string | string[];
 	keepSandbox?: boolean;
+	judgeReplies?: boolean;
 	verbose?: boolean;
 	timeoutMs?: number;
 	executeJob?: (job: RunJob, context: CurrentEnvHarnessContext) => Promise<WorkerResult>;
@@ -55,6 +61,7 @@ export interface InternalChatHarnessScenarioResult {
 	durationMs: number;
 	error?: string;
 	outboundPreview?: string;
+	judge?: HarnessReplyJudgeResult;
 	evidence: InternalChatHarnessEvidence;
 }
 
@@ -75,9 +82,11 @@ interface HarnessDriver {
 	sendMessage(input: {
 		chatKind: "dm" | "group";
 		chatId?: string;
+		chatTitle?: string;
 		senderId: string;
 		senderName: string;
 		text: string;
+		occurredAt?: string;
 		replyToMessageId?: string;
 		mentionBot?: boolean;
 		attachments?: Array<{
@@ -127,7 +136,7 @@ interface ScenarioContext extends CurrentEnvHarnessContext {
 interface ScenarioDefinition {
 	name: string;
 	channel: Exclude<HarnessChannel, "both">;
-	run(context: ScenarioContext): Promise<void>;
+	run(context: ScenarioContext): Promise<HarnessReplyJudgeResult | void>;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -271,12 +280,20 @@ function getPendingPair(store: JsonNekoclawStore, agentId: string, channel: Chan
 		.find((pair) => pair.channelType === channel && pair.externalConversationId === chatId && pair.status === "pending");
 }
 
-async function acceptPendingPair(context: ScenarioContext, chatId: string): Promise<SessionRecord> {
-	const pair = getPendingPair(context.store, context.agent.agentId, context.channel, chatId);
-	assertCondition(pair, `Expected a pending ${context.channel} pair for chat ${chatId}`);
+async function acceptPendingPairForChannel(
+	context: CurrentEnvHarnessContext,
+	channel: ChannelType,
+	chatId: string,
+): Promise<SessionRecord> {
+	const pair = getPendingPair(context.store, context.agent.agentId, channel, chatId);
+	assertCondition(pair, `Expected a pending ${channel} pair for chat ${chatId}`);
 	const accepted = context.store.acceptPair(pair.code);
 	await context.outboundDispatch.sendPairAcceptedMessage(accepted.pair);
 	return accepted.session;
+}
+
+async function acceptPendingPair(context: ScenarioContext, chatId: string): Promise<SessionRecord> {
+	return acceptPendingPairForChannel(context, context.channel, chatId);
 }
 
 function latestOutbound(driver: HarnessDriver, chatId: string): HarnessTranscriptEntry | undefined {
@@ -353,6 +370,33 @@ async function expectLatestOutboundContainsAll(
 	return outbound;
 }
 
+function transcriptForChat(driver: HarnessDriver, chatId: string): string[] {
+	return driver
+		.getTranscript()
+		.filter((entry) => entry.chatId === chatId && (entry.kind === "inbound" || entry.kind === "outbound"))
+		.map((entry) => {
+			const speaker = entry.kind === "inbound" ? "USER" : "BOT";
+			const text = entry.text?.trim() || "(empty)";
+			return `${speaker}: ${text}`;
+		});
+}
+
+async function judgeLatestOutbound(
+	context: ScenarioContext,
+	chatId: string,
+	spec: HarnessReplyJudgeSpec,
+): Promise<HarnessReplyJudgeResult> {
+	await waitForQueueIdle(context);
+	const outbound = latestOutbound(context.driver, chatId);
+	const reply = outbound?.text?.trim();
+	assertCondition(reply, `Expected outbound message for chat ${chatId} before judging`);
+	return judgeHarnessReply(context.store, context.agent, {
+		spec,
+		reply,
+		transcript: transcriptForChat(context.driver, chatId),
+	});
+}
+
 async function expectNoOutboundDelta(context: ScenarioContext, chatId: string, previousCount: number): Promise<void> {
 	await waitForQueueIdle(context);
 	const currentCount = countOutbound(context.driver, chatId);
@@ -375,6 +419,12 @@ function listSessionAttachmentNames(context: ScenarioContext, sessionRecordId: s
 function presetGroupTrigger(context: ScenarioContext, mode: "all" | "mention"): void {
 	context.store.setChannelGroupTrigger(context.agent.agentId, context.channel, mode);
 	(context.driver.plugin as { groupTrigger?: "all" | "mention" }).groupTrigger = mode;
+}
+
+function getDriver(context: CurrentEnvHarnessContext, channel: Exclude<HarnessChannel, "both">): HarnessDriver {
+	const driver = context.drivers.get(channel);
+	assertCondition(driver, `Expected a ${channel} harness driver`);
+	return driver;
 }
 
 async function scenarioDmPairPrompt(context: ScenarioContext): Promise<void> {
@@ -533,6 +583,35 @@ async function scenarioGroupPairCommand(context: ScenarioContext): Promise<void>
 	});
 	const outbound = latestOutbound(context.driver, context.groupChatId);
 	assertCondition(outbound?.text?.trim(), "Expected outbound after pairing a group chat");
+}
+
+async function scenarioToolProactiveSendMessage(context: ScenarioContext): Promise<void> {
+	presetGroupTrigger(context, "all");
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "please pair me",
+	});
+	await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "Group User",
+		text: "/pair",
+	});
+	await acceptPendingPair(context, context.groupChatId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "Use proactive send_message to tell the group: HARNESS_TARGET_OK and then confirm here with HARNESS_DM_OK",
+	});
+	await expectOutboundContains(context, context.dmUserId, "HARNESS_DM_OK");
+	await expectOutboundContains(context, context.groupChatId, "HARNESS_TARGET_OK");
 }
 
 async function scenarioAdminStatus(context: ScenarioContext): Promise<void> {
@@ -886,6 +965,562 @@ async function scenarioDmImageTextMixed(context: ScenarioContext): Promise<void>
 	await expectLatestOutboundContainsAll(context, context.dmUserId, [/stop/i]);
 }
 
+async function scenarioPersonaGroupObservationRecall(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	presetGroupTrigger(context, "mention");
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "群友A",
+		text: "/pair",
+		mentionBot: true,
+	});
+	await acceptPendingPair(context, context.groupChatId);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "301",
+		senderName: "用户A",
+		text: "支付接口又挂了",
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "302",
+		senderName: "用户B",
+		text: "我看看日志，应该是超时",
+		occurredAt: "2026-04-01T00:02:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "301",
+		senderName: "用户A",
+		text: "上次也是这样，改了半天",
+		occurredAt: "2026-04-01T00:04:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "303",
+		senderName: "用户C",
+		text: "群里刚才在聊什么？",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:10:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.groupChatId, {
+		title: "场景 1：群聊旁观",
+		expectations: [
+			"回答应概括出 A 和 B 在讨论支付接口故障，B 在排查日志。",
+			"不能编造错误码、日志明细等没有出现过的信息。",
+			"要明确自己只是旁观，没有参与讨论。",
+		],
+		failureSignals: [
+			"说自己不知道或完全忽略之前的群消息。",
+			"编造未出现的细节。",
+			"把旁观说成一起参与，比如“我们讨论了……”。",
+		],
+	});
+}
+
+async function scenarioPersonaCrossSessionMemory(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "张三",
+		text: "我叫张三，在做一个 GPU 租赁平台",
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "张三",
+		text: "我叫张三，在做一个 GPU 租赁平台",
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+	await removeAgentContainer(context.agent.containerName).catch(() => undefined);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "张三",
+		text: "上次跟你聊的那个项目，进展怎么样了你还记得吗",
+		occurredAt: "2026-04-03T00:00:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.dmUserId, {
+		title: "场景 2：跨 session 记忆人",
+		expectations: [
+			"能回忆起对方自称张三，且在做 GPU 租赁平台。",
+			"回复里要体现出知道这是之前聊过的同一个人和项目。",
+		],
+		failureSignals: [
+			"完全不记得之前聊过什么。",
+			"把别人的项目或身份错记到这个用户头上。",
+		],
+	});
+}
+
+async function scenarioPersonaEmotionalContextMemory(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "小王",
+		text: "pair me",
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	const session = await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "小王",
+		text: "我最近压力特别大，论文导师总是临时改方向",
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+	context.store.resetSession(context.agent.agentId, session.sessionRecordId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "小王",
+		text: "我每次一到 deadline 就想摸鱼，哈哈",
+		occurredAt: "2026-04-02T00:01:00.000Z",
+	});
+	context.store.resetSession(context.agent.agentId, session.sessionRecordId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "小王",
+		text: "唉又来了",
+		occurredAt: "2026-04-03T00:01:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.dmUserId, {
+		title: "场景 3：记住不像属性的记忆",
+		expectations: [
+			"要把“又来了”和之前的压力、导师改方向、deadline 背景关联起来。",
+			"回复应体现出理解对方处境，而不是把它当成全新话题。",
+			"不能编造没说过的细节。",
+		],
+		failureSignals: [
+			"把“又来了”当成完全没有上下文的新话题。",
+			"只会回忆硬事实，完全没有接住压力和处境。",
+			"补出用户没说过的额外细节。",
+		],
+	});
+}
+
+async function scenarioPersonaCrossPlatformIdentity(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	const tgDriver = getDriver(context, "telegram");
+	const tgChatId = "111";
+	await tgDriver.sendMessage({
+		chatKind: "dm",
+		chatId: tgChatId,
+		senderId: "111",
+		senderName: "小王",
+		text: "pair me",
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await waitForQueueIdle(context);
+	await acceptPendingPairForChannel(context, "telegram", tgChatId);
+	await tgDriver.sendMessage({
+		chatKind: "dm",
+		chatId: tgChatId,
+		senderId: "111",
+		senderName: "小王",
+		text: "我叫小王，正在准备毕业论文",
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+	await waitForQueueIdle(context);
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "QQ用户",
+		text: "pair me",
+		occurredAt: "2026-04-02T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "QQ用户",
+		text: "我是小王，之前在 TG 上跟你聊过",
+		occurredAt: "2026-04-02T00:01:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "QQ用户",
+		text: "我论文的事，后来改题目了",
+		occurredAt: "2026-04-02T00:02:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.dmUserId, {
+		title: "场景 4：跨平台自然语言认人",
+		expectations: [
+			"bot 应该意识到对方可能是之前 TG 上那个自称小王、聊过毕业论文的人。",
+			"第二次回复时能自然衔接论文话题，不要求用户重新解释背景。",
+			"如果不确定，可以主动确认，但不能把不确定当成确定事实。",
+		],
+		failureSignals: [
+			"完全没有关联意识，把对方当成陌生人。",
+			"不确定也不问，直接无视已有背景。",
+			"把不相关别人的经历混进来。",
+		],
+	});
+}
+
+async function scenarioPersonaCorrection(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "小王",
+		text: "pair me",
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, "111");
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "小王",
+		text: "我叫小王，最近在准备毕业论文",
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "新用户",
+		text: "pair me",
+		occurredAt: "2026-04-02T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "新用户",
+		text: "我是小王的同事，他让我来问你个问题",
+		occurredAt: "2026-04-02T00:01:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "新用户",
+		text: "对了我叫李四",
+		occurredAt: "2026-04-02T00:02:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "新用户",
+		text: "你搞错了，我不是小王，我是他同事",
+		occurredAt: "2026-04-02T00:03:00.000Z",
+	});
+	await removeAgentContainer(context.agent.containerName).catch(() => undefined);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "李四",
+		text: "你还记得我是谁吗？",
+		occurredAt: "2026-04-03T00:00:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.dmUserId, {
+		title: "场景 5：自然语言纠偏——认错人",
+		expectations: [
+			"不能因为提到小王就把对方当成小王。",
+			"后续要把这个人当成李四，并记得他是小王的同事。",
+			"纠偏后下一个 session 也不能再把李四当成小王。",
+		],
+		failureSignals: [
+			"把李四当成小王。",
+			"纠偏后同一个 session 继续犯错。",
+			"下一个 session 又犯同样的错。",
+		],
+	});
+}
+
+async function scenarioPersonaExperienceRecall(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	presetGroupTrigger(context, "mention");
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "群友",
+		text: "/pair",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.groupChatId);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "111",
+		senderName: "小王",
+		text: "@mock_bot Python 异步里 await 和 create_task 怎么选？",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "111",
+		senderName: "小王",
+		text: "@mock_bot 我们项目架构里数据库选型怎么定？",
+		mentionBot: true,
+		occurredAt: "2026-04-03T00:00:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "111",
+		senderName: "小王",
+		text: "上次选的数据库果然不行，要换",
+		occurredAt: "2026-04-05T00:00:00.000Z",
+	});
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "小王",
+		text: "pair me",
+		occurredAt: "2026-04-07T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, "111");
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "小王",
+		text: "我们之前在群里一起讨论过的那些事你还记得吗？",
+		occurredAt: "2026-04-07T00:01:00.000Z",
+	});
+	return judgeLatestOutbound(context, "111", {
+		title: "场景 6：经历沉淀与跨时间关联",
+		expectations: [
+			"能回忆起和小王在群里的主要互动，例如 Python 异步问题、数据库选型讨论。",
+			"能把后续“数据库不行，要换”和之前的数据库选型讨论关联起来。",
+			"要区分哪些是一起讨论过的，哪些只是后来旁观到的。",
+			"回忆应该按事件组织，而不是机械复读原始消息流。",
+		],
+		failureSignals: [
+			"完全不记得群里的互动。",
+			"只记零散句子，无法把数据库抱怨和之前的讨论联系起来。",
+			"把后来旁观到的抱怨说成一起讨论过。",
+			"把群里其他人的话错归给小王。",
+		],
+	});
+}
+
+async function scenarioPersonaUncertainty(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	presetGroupTrigger(context, "mention");
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "群友",
+		text: "/pair",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.groupChatId);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "401",
+		senderName: "老王",
+		text: "@mock_bot 我今天又在看项目日志",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: "402",
+		senderName: "王老师",
+		text: "@mock_bot 毕业论文这周得交了",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:02:00.000Z",
+	});
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "新私聊",
+		text: "pair me",
+		occurredAt: "2026-04-02T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "新私聊",
+		text: "我是群 X 里的老王",
+		occurredAt: "2026-04-02T00:01:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.dmUserId, {
+		title: "场景 7：不确定时表达不确定",
+		expectations: [
+			"如果能区分，就根据已有信息自然关联。",
+			"如果还不够确定，要主动表达不确定并发起确认。",
+			"不能在不确定的情况下假装已经百分百认出来。",
+		],
+		failureSignals: [
+			"随机把记忆挂到某个人身上。",
+			"明明不确定却表现得非常确定。",
+			"完全忽略关联可能性。",
+		],
+	});
+}
+
+async function scenarioPersonaMultiGroupExperience(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	presetGroupTrigger(context, "mention");
+	const groupA = "-100201";
+	const groupB = "-100202";
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: groupA,
+		chatTitle: "群A",
+		senderId: context.groupUserId,
+		senderName: "群友A",
+		text: "/pair",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, groupA);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: groupB,
+		chatTitle: "群B",
+		senderId: context.groupUserId,
+		senderName: "群友B",
+		text: "/pair",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, groupB);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: groupA,
+		chatTitle: "群A",
+		senderId: "111",
+		senderName: "小王",
+		text: "@mock_bot 我最近在忙创业项目，产品方向还在调",
+		mentionBot: true,
+		occurredAt: "2026-04-01T00:01:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: groupB,
+		chatTitle: "群B",
+		senderId: "111",
+		senderName: "小王",
+		text: "最近在招人，忙不过来了",
+		occurredAt: "2026-04-02T00:01:00.000Z",
+	});
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "小王",
+		text: "pair me",
+		occurredAt: "2026-04-03T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, "111");
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "小王",
+		text: "我最近忙的那些事你都知道吧？",
+		occurredAt: "2026-04-03T00:01:00.000Z",
+	});
+	return judgeLatestOutbound(context, "111", {
+		title: "场景 8：多群同一人经历整合",
+		expectations: [
+			"能同时回忆起群 A 的创业项目讨论和群 B 的招人信息。",
+			"要区分哪些是一起讨论过的，哪些只是旁观到的。",
+			"不能把两个群的事情混成一团说不清来源。",
+		],
+		failureSignals: [
+			"只记得一个群的事，漏另一个群。",
+			"把旁观到的说成一起讨论过。",
+			"把群 A 和群 B 的经历混淆来源。",
+		],
+	});
+}
+
+async function scenarioPersonaMemoryDecay(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "用户A",
+		text: "pair me",
+		occurredAt: "2026-05-01T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, context.dmUserId);
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我认识的人",
+			"- 用户A(tg:111)：长期在做 GPU 租赁平台，最近在修支付链路 → memory/people/telegram-111.md",
+			"",
+			"## 最近的重要事情",
+			"- 用户A 长期在推进 GPU 租赁平台。",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaPeopleDir(context.agent.slug), "telegram-111.md"),
+		[
+			"用户A 长期在做 GPU 租赁平台，这是一条持续性的重要背景。",
+			"一个月前他随口说过“下周可能去杭州”，这是临时信息，后来没有再提。",
+			"最近仍在折腾平台里的支付链路和项目推进。",
+		].join("\n"),
+		"utf-8",
+	);
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "用户A",
+		text: "最近在修支付链路，快被超时问题烦死了",
+		occurredAt: "2026-05-02T00:00:00.000Z",
+	});
+	return judgeLatestOutbound(context, context.dmUserId, {
+		title: "场景 9：记忆自然老化",
+		expectations: [
+			"不应该在无关语境下主动提起一个月前随口说的杭州行程。",
+			"可以围绕当前支付链路或长期项目背景回复。",
+			"长期重要背景不应像临时琐事一样一起消失。",
+		],
+		failureSignals: [
+			"突然主动提起一个月前的杭州行程。",
+			"把所有旧信息都当成同等重要，一股脑往外倒。",
+			"长期项目背景也完全消失，像失忆一样。",
+		],
+	});
+}
+
 const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "dm_pair_prompt", channel: "telegram", run: scenarioDmPairPrompt },
 	{ name: "dm_pair_accept_and_chat", channel: "telegram", run: scenarioDmPairAcceptAndChat },
@@ -901,10 +1536,19 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "group_mention_chat", channel: "telegram", run: scenarioGroupMentionChat },
 	{ name: "group_reply_chat", channel: "telegram", run: scenarioGroupReplyChat },
 	{ name: "group_pair_command", channel: "telegram", run: scenarioGroupPairCommand },
+	{ name: "tool_proactive_send_message", channel: "telegram", run: scenarioToolProactiveSendMessage },
 	{ name: "admin_status", channel: "telegram", run: scenarioAdminStatus },
 	{ name: "admin_trigger_toggle", channel: "telegram", run: scenarioAdminTriggerToggle },
 	{ name: "admin_reset", channel: "telegram", run: scenarioAdminReset },
 	{ name: "admin_model_session_override", channel: "telegram", run: scenarioAdminModelSessionOverride },
+	{ name: "persona_group_observation_recall", channel: "telegram", run: scenarioPersonaGroupObservationRecall },
+	{ name: "persona_cross_session_memory", channel: "telegram", run: scenarioPersonaCrossSessionMemory },
+	{ name: "persona_emotional_context_memory", channel: "telegram", run: scenarioPersonaEmotionalContextMemory },
+	{ name: "persona_correction", channel: "telegram", run: scenarioPersonaCorrection },
+	{ name: "persona_experience_recall", channel: "telegram", run: scenarioPersonaExperienceRecall },
+	{ name: "persona_uncertainty", channel: "telegram", run: scenarioPersonaUncertainty },
+	{ name: "persona_multi_group_experience", channel: "telegram", run: scenarioPersonaMultiGroupExperience },
+	{ name: "persona_memory_decay", channel: "telegram", run: scenarioPersonaMemoryDecay },
 	{ name: "dm_pair_prompt", channel: "napcat", run: scenarioDmPairPrompt },
 	{ name: "dm_pair_accept_and_chat", channel: "napcat", run: scenarioDmPairAcceptAndChat },
 	{ name: "dm_context_continuity", channel: "napcat", run: scenarioDmContextContinuity },
@@ -919,10 +1563,12 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "group_mention_chat", channel: "napcat", run: scenarioGroupMentionChat },
 	{ name: "group_reply_chat", channel: "napcat", run: scenarioGroupReplyChat },
 	{ name: "group_pair_command", channel: "napcat", run: scenarioGroupPairCommand },
+	{ name: "tool_proactive_send_message", channel: "napcat", run: scenarioToolProactiveSendMessage },
 	{ name: "admin_status", channel: "napcat", run: scenarioAdminStatus },
 	{ name: "admin_trigger_toggle", channel: "napcat", run: scenarioAdminTriggerToggle },
 	{ name: "admin_reset", channel: "napcat", run: scenarioAdminReset },
 	{ name: "admin_model_session_override", channel: "napcat", run: scenarioAdminModelSessionOverride },
+	{ name: "persona_cross_platform_identity", channel: "napcat", run: scenarioPersonaCrossPlatformIdentity },
 ];
 
 class TelegramHarnessDriver implements HarnessDriver {
@@ -953,9 +1599,11 @@ class TelegramHarnessDriver implements HarnessDriver {
 	async sendMessage(input: {
 		chatKind: "dm" | "group";
 		chatId?: string;
+		chatTitle?: string;
 		senderId: string;
 		senderName: string;
 		text: string;
+		occurredAt?: string;
 		replyToMessageId?: string;
 		mentionBot?: boolean;
 		attachments?: Array<{
@@ -985,8 +1633,9 @@ class TelegramHarnessDriver implements HarnessDriver {
 				createTelegramMessage({
 					chatId: Number(chatId),
 					chatType: input.chatKind === "dm" ? "private" : "supergroup",
-					chatTitle: input.chatKind === "group" ? GROUP_TITLE : undefined,
+					chatTitle: input.chatKind === "group" ? input.chatTitle ?? GROUP_TITLE : undefined,
 					messageId: Number(messageId),
+					date: input.occurredAt ? Math.floor(new Date(input.occurredAt).getTime() / 1_000) : undefined,
 					replyToMessageId: input.replyToMessageId ? Number(input.replyToMessageId) : undefined,
 					text: authoredText,
 					from: {
@@ -1008,9 +1657,10 @@ class TelegramHarnessDriver implements HarnessDriver {
 				createTelegramMessage({
 					chatId: Number(chatId),
 					chatType: input.chatKind === "dm" ? "private" : "supergroup",
-					chatTitle: input.chatKind === "group" ? GROUP_TITLE : undefined,
+					chatTitle: input.chatKind === "group" ? input.chatTitle ?? GROUP_TITLE : undefined,
 					messageId: Number(messageId),
 					mediaGroupId,
+					date: input.occurredAt ? Math.floor(new Date(input.occurredAt).getTime() / 1_000) : undefined,
 					replyToMessageId: input.replyToMessageId ? Number(input.replyToMessageId) : undefined,
 					caption: index === 0 ? authoredText : undefined,
 					photo:
@@ -1091,9 +1741,11 @@ class NapcatHarnessDriver implements HarnessDriver {
 	async sendMessage(input: {
 		chatKind: "dm" | "group";
 		chatId?: string;
+		chatTitle?: string;
 		senderId: string;
 		senderName: string;
 		text: string;
+		occurredAt?: string;
 		replyToMessageId?: string;
 		mentionBot?: boolean;
 		attachments?: Array<{
@@ -1153,7 +1805,7 @@ class NapcatHarnessDriver implements HarnessDriver {
 				post_type: "message",
 				message_type: input.chatKind === "dm" ? "private" : "group",
 				sub_type: input.chatKind === "dm" ? "friend" : "normal",
-				time: Math.floor(Date.now() / 1_000),
+				time: input.occurredAt ? Math.floor(new Date(input.occurredAt).getTime() / 1_000) : Math.floor(Date.now() / 1_000),
 				self_id: Number(this.selfId),
 				user_id: Number(input.senderId),
 				group_id: input.chatKind === "group" ? Number(chatId) : undefined,
@@ -1216,6 +1868,13 @@ function cloneAgentWorkspace(store: JsonNekoclawStore, source: AgentSpec, target
 	mkdirSync(targetRuntime, { recursive: true });
 	if (existsSync(sourceRuntime)) {
 		cpSync(sourceRuntime, targetRuntime, { recursive: true, force: true });
+	}
+	const sourcePersona = store.getPersonaDir(source.slug);
+	const targetPersona = store.getPersonaDir(target.slug);
+	rmSync(targetPersona, { recursive: true, force: true });
+	mkdirSync(targetPersona, { recursive: true });
+	if (existsSync(sourcePersona)) {
+		cpSync(sourcePersona, targetPersona, { recursive: true, force: true });
 	}
 	rmSync(join(targetRoot, "chats"), { recursive: true, force: true });
 	mkdirSync(join(targetRoot, "chats"), { recursive: true });
@@ -1423,6 +2082,17 @@ export async function runChatHarnessInCurrentEnvironment(
 			}
 			driver.clearTranscript();
 			await removeAgentContainer(context.agent.containerName);
+			for (const session of context.store.listSessions(context.agent.agentId)) {
+				context.store.removeSession(context.agent.agentId, session.sessionRecordId, { purge: true });
+			}
+			context.store.deletePairRequestsForAgent(context.agent.agentId);
+			rmSync(context.store.getPersonaDir(context.agent.slug), { recursive: true, force: true });
+			context.store.rewriteQueueEvents(context.agent.agentId, []);
+			context.store.writeRuntimeState({
+				...context.store.getRuntimeState(context.agent.agentId),
+				currentJobId: undefined,
+				updatedAt: nowIso(),
+			});
 			if (baselineRuntimeModels) {
 				context.store.writeRuntimeModelsConfig(
 					context.agent.agentId,
@@ -1444,8 +2114,12 @@ export async function runChatHarnessInCurrentEnvironment(
 				adminUserId: String(90001 + results.length + 1),
 			};
 			presetGroupTrigger(scenarioContext, "all");
+			let judge: HarnessReplyJudgeResult | undefined;
 			try {
-				await scenario.run(scenarioContext);
+				judge = (await scenario.run(scenarioContext)) ?? undefined;
+				if (judge && judge.verdict === "fail") {
+					throw new Error(`LLM judge failed: ${judge.reason}`);
+				}
 				const outbound = [...driver.getTranscript()].reverse().find((entry) => entry.kind === "outbound");
 				results.push({
 					name: scenario.name,
@@ -1453,6 +2127,7 @@ export async function runChatHarnessInCurrentEnvironment(
 					status: "passed",
 					durationMs: Date.now() - start,
 					outboundPreview: outbound?.text,
+					judge,
 					evidence: collectEvidence(scenarioContext),
 				});
 			} catch (error) {
@@ -1465,6 +2140,7 @@ export async function runChatHarnessInCurrentEnvironment(
 					outboundPreview:
 						latestOutbound(driver, scenarioContext.dmChatId)?.text ??
 						latestOutbound(driver, scenarioContext.groupChatId)?.text,
+					judge,
 					evidence: collectEvidence(scenarioContext),
 				});
 			}

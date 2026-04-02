@@ -79,6 +79,30 @@ export class JsonNekoclawStore {
 		return this.models.getRuntimeModelsPath(slug);
 	}
 
+	getPersonaDir(slug: string): string {
+		return this.agents.getPersonaDir(slug);
+	}
+
+	getPersonaIndexPath(slug: string): string {
+		return this.agents.getPersonaIndexPath(slug);
+	}
+
+	getPersonaPeopleDir(slug: string): string {
+		return this.agents.getPersonaPeopleDir(slug);
+	}
+
+	getPersonaScenesDir(slug: string): string {
+		return this.agents.getPersonaScenesDir(slug);
+	}
+
+	getPersonaObservationsDir(slug: string): string {
+		return this.agents.getPersonaObservationsDir(slug);
+	}
+
+	getPersonaObservationPath(slug: string, sceneRef: string): string {
+		return this.agents.getPersonaObservationPath(slug, sceneRef);
+	}
+
 	getSessionDir(slug: string, sessionRecordId: string): string {
 		return this.sessions.getSessionDir(slug, sessionRecordId);
 	}
@@ -454,6 +478,10 @@ export class JsonNekoclawStore {
 		const pair = this.pairs.markRejected(code);
 		this.audit(pair.agentId, "pair.rejected", { code });
 		return pair;
+	}
+
+	deletePairRequestsForAgent(agentId: string): void {
+		this.pairs.deletePairsForAgent(agentId);
 	}
 
 	readSoul(agentRef: string): string {

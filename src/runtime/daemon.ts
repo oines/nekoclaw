@@ -12,6 +12,7 @@ import { RuntimeControlService } from "./runtime-control.js";
 import { RuntimeBusyError } from "./errors.js";
 import { getRuntimeKey } from "./runtime-key.js";
 import { WorkerRunnerService } from "./worker-runner.js";
+import { PersonaMemoryService } from "./persona-memory.js";
 
 export class NekoclawDaemon {
 	private channelPlugins = new Map<string, ChannelPlugin>();
@@ -28,9 +29,11 @@ export class NekoclawDaemon {
 	private readonly messageRouter: MessageRouterService;
 	private readonly channelRuntime: ChannelRuntimeService;
 	private readonly runtimeControl: RuntimeControlService;
+	private readonly personaMemory: PersonaMemoryService;
 
 	constructor(private store: JsonNekoclawStore = new JsonNekoclawStore()) {
 		this.outboundDispatch = new OutboundDispatchService(this.store, this.channelPlugins);
+		this.personaMemory = new PersonaMemoryService(this.store);
 		this.workerRunner = new WorkerRunnerService(this.store, this.outboundDispatch, this.channelPlugins, (agentRef) => this.startAgentContainer(agentRef));
 		this.jobQueue = new JobQueueService(this.store, this.agentQueues, this.processingAgents, (job) => this.workerRunner.runJob(job));
 		const commands = new CommandRouterService(this.store, (agentId) => this.jobQueue.getStatus(agentId));
@@ -47,8 +50,12 @@ export class NekoclawDaemon {
 		this.jobQueue.initialize();
 		await this.processRuntimeControlActions();
 		await this.channelRuntime.syncAgents();
+		this.queuePersonaBacklogSweeps();
 		this.syncTimer = setInterval(() => {
-			void this.processRuntimeControlActions().then(() => this.channelRuntime.syncAgents());
+			void this.processRuntimeControlActions().then(() => {
+				void this.channelRuntime.syncAgents();
+				this.queuePersonaBacklogSweeps();
+			});
 		}, 2_000);
 		this.keepAliveTimer = setInterval(() => undefined, 60_000);
 	}
@@ -150,5 +157,14 @@ export class NekoclawDaemon {
 
 	async handleInbound(agentId: string, channelType: ChannelType, event: InboundMessageEvent): Promise<void> {
 		await this.messageRouter.handleInbound(agentId, channelType, event);
+	}
+
+	private queuePersonaBacklogSweeps(): void {
+		for (const agent of this.store.listAgents()) {
+			if (this.processingAgents.has(agent.agentId)) {
+				continue;
+			}
+			this.personaMemory.queueBacklogSweep(agent);
+		}
 	}
 }

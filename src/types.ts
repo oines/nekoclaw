@@ -363,6 +363,7 @@ export interface ChannelToolContext {
 	session: SessionRecord;
 	event: InboundMessageEvent;
 	capabilities: ChannelCapabilities;
+	runtimeDirectory: RuntimeDirectorySnapshot;
 	isExplicitlyAddressed?: boolean;
 	recordAction: (action: ChannelToolAction) => void;
 }
@@ -395,6 +396,11 @@ export interface ChannelPlugin {
 export type ChannelToolAction =
 	| {
 			kind: "send";
+			payload: ReplyPayload;
+	  }
+	| {
+			kind: "send_targeted";
+			target: string;
 			payload: ReplyPayload;
 	  }
 	| {
@@ -436,11 +442,56 @@ export interface QueueEvent {
 	error?: string;
 }
 
+export interface PreparedPersonaMemoryDocument {
+	path: string;
+	content: string;
+}
+
+export interface PreparedPersonaContext {
+	indexMarkdown: string;
+	sceneObservations: string;
+	selectedMemories: PreparedPersonaMemoryDocument[];
+	selectionNotes: string;
+}
+
+export interface RuntimeDirectoryContactSnapshot {
+	account: string;
+	displayName?: string;
+	channel: ChannelType;
+	lastSeenAt: string;
+	pairedSessionKey?: string;
+	sourceHints: string[];
+}
+
+export interface RuntimeDirectoryGroupSnapshot {
+	groupRef: string;
+	title?: string;
+	channel: ChannelType;
+	lastSeenAt: string;
+	pairedSessionKey?: string;
+}
+
+export interface RuntimeDirectoryGroupMemberSnapshot {
+	account: string;
+	displayName?: string;
+	lastSeenAt: string;
+	source: "runtime_seen" | "napcat_live";
+}
+
+export interface RuntimeDirectorySnapshot {
+	contacts: RuntimeDirectoryContactSnapshot[];
+	groups: RuntimeDirectoryGroupSnapshot[];
+	groupMembers: Record<string, RuntimeDirectoryGroupMemberSnapshot[]>;
+	availableChannels: ChannelType[];
+}
+
 export interface WorkerPayload {
 	agent: AgentSpec;
 	job: RunJob;
 	currentSession: SessionRecord;
 	capabilities: ChannelCapabilities;
+	runtimeDirectory: RuntimeDirectorySnapshot;
+	personaContext?: PreparedPersonaContext;
 	selfIdentity?: {
 		telegramHandles?: string[];
 		platformUserId?: string;

@@ -76,6 +76,22 @@ describe("internal chat harness", () => {
 			if (text.includes("Say paired")) {
 				return { outbound: { text: "paired" } };
 			}
+			if (text.includes("Use proactive send_message to tell the group: HARNESS_TARGET_OK and then confirm here with HARNESS_DM_OK")) {
+				const targetGroup = context.store
+					.listSessions(job.agentId)
+					.find((session) => session.channelType === job.event.channelType && session.chatKind === "group");
+				expect(targetGroup).toBeDefined();
+				return {
+					outbound: { text: "HARNESS_DM_OK" },
+					toolActions: [
+						{
+							kind: "send_targeted",
+							target: `${job.event.channelType}:group:${targetGroup!.externalConversationId}`,
+							payload: { text: "HARNESS_TARGET_OK" },
+						},
+					],
+				};
+			}
 			if (text.includes("What is the dominant color in this image? Reply with exactly: RED")) {
 				const imageBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "image" }> => block.kind === "image");
 				expect(imageBlock?.attachment?.relativePath).toBeTruthy();
@@ -170,12 +186,13 @@ describe("internal chat harness", () => {
 				"dm_file_attachment",
 				"dm_multi_file_attachment",
 				"dm_image_text_mixed",
+				"tool_proactive_send_message",
 			],
 			executeJob,
 		});
 
 		expect(report.ok).toBe(true);
-		expect(report.results).toHaveLength(18);
+		expect(report.results).toHaveLength(20);
 		expect(report.results.every((result) => result.status === "passed")).toBe(true);
 		expect(report.results.some((result) => result.channel === "telegram")).toBe(true);
 		expect(report.results.some((result) => result.channel === "napcat")).toBe(true);
@@ -183,6 +200,8 @@ describe("internal chat harness", () => {
 			const mediaResult = report.results.find((result) => result.channel === channel && result.name === "dm_file_attachment");
 			expect(mediaResult?.evidence.transcript.some((entry) => entry.kind === "outbound" && entry.attachments?.some((attachment) => attachment.kind === "image"))).toBe(true);
 			expect(mediaResult?.evidence.transcript.some((entry) => entry.kind === "outbound" && entry.attachments?.some((attachment) => attachment.kind === "file"))).toBe(true);
+			const proactiveResult = report.results.find((result) => result.channel === channel && result.name === "tool_proactive_send_message");
+			expect(proactiveResult?.evidence.transcript.some((entry) => entry.kind === "outbound" && entry.text?.includes("HARNESS_TARGET_OK"))).toBe(true);
 		}
-		}, 20_000);
+	}, 20_000);
 	});

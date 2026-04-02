@@ -37,6 +37,34 @@ export class StorePaths {
 		return join(this.getRuntimeAgentDir(slug), "models.json");
 	}
 
+	getPersonaDir(slug: string): string {
+		return join(this.getWorkspaceRoot(slug), ".nekoclaw-persona");
+	}
+
+	getPersonaIndexPath(slug: string): string {
+		return join(this.getPersonaDir(slug), "index.md");
+	}
+
+	getPersonaMemoryDir(slug: string): string {
+		return join(this.getPersonaDir(slug), "memory");
+	}
+
+	getPersonaPeopleDir(slug: string): string {
+		return join(this.getPersonaMemoryDir(slug), "people");
+	}
+
+	getPersonaScenesDir(slug: string): string {
+		return join(this.getPersonaMemoryDir(slug), "scenes");
+	}
+
+	getPersonaObservationsDir(slug: string): string {
+		return join(this.getPersonaDir(slug), "observations");
+	}
+
+	getPersonaObservationPath(slug: string, sceneRef: string): string {
+		return join(this.getPersonaObservationsDir(slug), `${sceneRef}.log`);
+	}
+
 	getSessionDir(slug: string, sessionRecordId: string): string {
 		return join(this.getWorkspaceRoot(slug), "chats", sessionRecordId);
 	}

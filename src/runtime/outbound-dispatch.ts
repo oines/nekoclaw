@@ -11,6 +11,7 @@ import type {
 } from "../types.js";
 import { getRuntimeKey } from "./runtime-key.js";
 import { NEKOCLAW_CONTAINER_WORKSPACE_DIR } from "../config.js";
+import { parseTargetRef } from "./runtime-directory.js";
 
 export class OutboundDispatchService {
 	constructor(
@@ -110,6 +111,23 @@ export class OutboundDispatchService {
 						payload: this.rebasePayload(agent, action.payload),
 					});
 					break;
+				case "send_targeted": {
+					const target = parseTargetRef(action.target);
+					if (!target) {
+						throw new Error(`Invalid send_message target: ${action.target}`);
+					}
+					const targetChannel = this.store.getChannel(agent.agentId, target.channelType);
+					const targetPlugin = this.channelPlugins.get(getRuntimeKey(agent, targetChannel));
+					if (!targetPlugin) {
+						throw new Error(`The ${target.channelType} channel is not active for ${agent.slug}`);
+					}
+					await targetPlugin.actions.send({
+						chatId: target.externalConversationId,
+						chatKind: target.chatKind,
+						payload: this.rebasePayload(agent, action.payload),
+					});
+					break;
+				}
 				case "reply":
 					await plugin.actions.reply({
 						chatId: session.externalConversationId,
@@ -146,4 +164,3 @@ export class OutboundDispatchService {
 		});
 	}
 }
-
