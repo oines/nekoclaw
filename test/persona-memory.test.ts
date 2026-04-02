@@ -588,7 +588,7 @@ describe("persona memory service", () => {
 			lastCompletedAt: "2026-04-01T12:00:00.000Z",
 			lastCorpusSignature: "irrelevant",
 		});
-		vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-01T18:00:00.000Z").getTime());
+		vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-01T15:00:00.000Z").getTime());
 		personaMemory.queueDream(agent);
 		await waitForBackgroundWork();
 		expect(runDream).not.toHaveBeenCalled();
