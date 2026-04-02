@@ -76,7 +76,7 @@ describe("internal chat harness", () => {
 			if (text.includes("Say paired")) {
 				return { outbound: { text: "paired" } };
 			}
-			if (text.includes("Look at this image and reply with exactly: RED")) {
+			if (text.includes("What is the dominant color in this image? Reply with exactly: RED")) {
 				const imageBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "image" }> => block.kind === "image");
 				expect(imageBlock?.attachment?.relativePath).toBeTruthy();
 				const imagePath = join(context.workspaceRoot, imageBlock!.attachment!.relativePath);
@@ -84,7 +84,7 @@ describe("internal chat harness", () => {
 				expect(readFileSync(imagePath).byteLength).toBeGreaterThan(0);
 				return { outbound: { text: "RED" } };
 			}
-			if (text.includes("You received two images in one message. Reply with exactly: RED,BLUE")) {
+			if (text.includes("You received two solid-color images in one message. Reply with exactly: RED,BLUE")) {
 				const imageBlocks = job.event.blocks.filter((block): block is Extract<(typeof job.event.blocks)[number], { kind: "image" }> => block.kind === "image");
 				expect(imageBlocks).toHaveLength(2);
 				for (const block of imageBlocks) {
@@ -102,6 +102,14 @@ describe("internal chat harness", () => {
 				expect(existsSync(imagePath)).toBe(true);
 				expect(readFileSync(imagePath).byteLength).toBeGreaterThan(100);
 				return { outbound: { text: "A TREE stands near a HOUSE under the SUN." } };
+			}
+			if (text.includes("复述这张图片的内容。先直接说画面里有什么")) {
+				const imageBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "image" }> => block.kind === "image");
+				expect(imageBlock?.attachment?.relativePath).toBeTruthy();
+				const imagePath = join(context.workspaceRoot, imageBlock!.attachment!.relativePath);
+				expect(existsSync(imagePath)).toBe(true);
+				expect(readFileSync(imagePath).byteLength).toBeGreaterThan(100);
+				return { outbound: { text: "画面里有一棵树、一栋房子和太阳。" } };
 			}
 			if (text.includes("Open the attached file and reply with the secret word only.")) {
 				const fileBlock = job.event.blocks.find((block): block is Extract<(typeof job.event.blocks)[number], { kind: "file" }> => block.kind === "file");
@@ -158,6 +166,7 @@ describe("internal chat harness", () => {
 				"dm_image_vision",
 				"dm_multi_image_vision",
 				"dm_natural_image_description",
+				"dm_natural_image_restate_cn",
 				"dm_file_attachment",
 				"dm_multi_file_attachment",
 				"dm_image_text_mixed",
@@ -166,7 +175,7 @@ describe("internal chat harness", () => {
 		});
 
 		expect(report.ok).toBe(true);
-		expect(report.results).toHaveLength(16);
+		expect(report.results).toHaveLength(18);
 		expect(report.results.every((result) => result.status === "passed")).toBe(true);
 		expect(report.results.some((result) => result.channel === "telegram")).toBe(true);
 		expect(report.results.some((result) => result.channel === "napcat")).toBe(true);

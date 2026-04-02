@@ -10,7 +10,10 @@ import {
 	SettingsManager,
 } from "@mariozechner/pi-coding-agent";
 import type { AssistantMessage, ImageContent, UserMessage } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@mariozechner/pi-ai";
 import { summarizeBlocks } from "../messages.js";
+import type { RuntimeModelsConfig } from "../model/model-types.js";
+import { resolveRuntimeModelInput } from "../model/runtime-model-metadata.js";
 import { readTextFile } from "../store/fs.js";
 import { createToolComposition } from "../tools/index.js";
 import type { ChannelToolAction, WorkerPayload, WorkerResult } from "../types.js";
@@ -65,6 +68,7 @@ export function collectPromptImages(
 }
 
 export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: string): string {
+	const hasCurrentImages = payload.job.event.blocks.some((block) => block.kind === "image");
 	const identityLines = [
 		payload.selfIdentity?.platformUserId
 			? `- Your platform user id in this session: ${payload.selfIdentity.platformUserId}`
@@ -90,6 +94,12 @@ export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: 
 - ONLY use the \`message\` tool when explicitly needing to edit, delete, targeted replyToId, or simulate typing.
 - Use the \`session_status\` tool to inspect current session capabilities before choosing a messaging action.
 - Use the \`no_reply\` tool when the best action is to intentionally stay silent.
+${hasCurrentImages
+	? `- The current inbound message includes image content. If the user asks what is in the image, answer with direct visual facts first.
+- Do NOT use placeholder templates, bracketed fill-ins, canned admiration, or speculative scene descriptions.
+- Do NOT write phrases like "[此处根据图片内容描述]" / "例如" / "比如" as stand-ins.
+- If something is unclear, say exactly which detail is unclear instead of guessing.`
+	: ""}
 
 ## Current Session
 - Session key: ${payload.currentSession.sessionKey}
@@ -117,7 +127,9 @@ function buildPrompt(payload: WorkerPayload, hasImages: boolean, hasFiles: boole
 		...summarizeBlocks(payload.job.event.blocks),
 	];
 	if (hasImages) {
-		lines.push("\n[VISUAL DATA ATTACHED: Use your vision capabilities to analyze the provided image(s) above.]");
+		lines.push(
+			"\n[VISUAL DATA ATTACHED: Use your vision capabilities to analyze the provided image(s) above. Describe only what is visually supported. No placeholder templates, no bracketed examples, no generic praise, and no invented details.]",
+		);
 	}
 	if (hasFiles) {
 		lines.push("\n[FILES AVAILABLE IN WORKSPACE: Any File paths listed above are already saved under the workspace. Read those files directly if you need their contents.]");
@@ -169,6 +181,31 @@ function overrideSessionPrompt(session: Awaited<ReturnType<typeof createAgentSes
 	s._rebuildSystemPrompt = () => prompt;
 }
 
+function augmentModelInputFromRuntimeConfig(
+	model: Model<Api>,
+	runtimeModelsPath: string,
+): Model<Api> {
+	if (model.input.includes("image")) {
+		return model;
+	}
+	if (!existsSync(runtimeModelsPath)) {
+		return model;
+	}
+	try {
+		const config = JSON.parse(readFileSync(runtimeModelsPath, "utf-8")) as RuntimeModelsConfig;
+		const input = resolveRuntimeModelInput(config, model.provider, model.id);
+		if (!input?.includes("image")) {
+			return model;
+		}
+		return {
+			...model,
+			input: Array.from(new Set([...model.input, ...input])),
+		} as Model<Api>;
+	} catch {
+		return model;
+	}
+}
+
 export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	const runtimeAgentDir = join(WORKSPACE_DIR, ".nekoclaw-runtime");
 	const settingsManager = SettingsManager.inMemory();
@@ -213,6 +250,7 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 		if (!model) {
 			throw new Error(`Unknown model ${payload.effectiveModel.provider}/${payload.effectiveModel.modelId}`);
 		}
+		model = augmentModelInputFromRuntimeConfig(model, join(runtimeAgentDir, "models.json"));
 	}
 
 	const { session } = await createAgentSession({

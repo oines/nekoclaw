@@ -3,6 +3,7 @@ export interface RuntimeModelEntry {
 	name?: string;
 	reasoning?: boolean;
 	input?: string[];
+	capabilities?: string[];
 	contextWindow?: number;
 	maxTokens?: number;
 	cost?: {

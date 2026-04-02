@@ -1,4 +1,5 @@
 import type { RuntimeModelEntry, RuntimeModelProvider, RuntimeModelsConfig } from "./model-types.js";
+import { buildRuntimeModelEntryMetadata } from "./runtime-model-metadata.js";
 import type { ModelApiFormat, ProxyProbeResult } from "../types.js";
 
 interface ProbeOptions {
@@ -128,21 +129,31 @@ interface RuntimeModelConfigOptions {
 	modelId: string;
 }
 
-function createRuntimeModelEntry(modelId: string): RuntimeModelEntry {
+function createRuntimeModelEntry(options: {
+	provider: string;
+	providerConfig?: RuntimeModelProvider;
+	modelId: string;
+}): RuntimeModelEntry {
 	return {
-		id: modelId,
-		name: modelId,
+		id: options.modelId,
+		name: options.modelId,
+		...buildRuntimeModelEntryMetadata({
+			providerId: options.provider,
+			provider: options.providerConfig,
+			modelId: options.modelId,
+		}),
 	};
 }
 
 function createRuntimeModelProvider(options: RuntimeModelConfigOptions): RuntimeModelProvider {
-	return {
+	const provider: RuntimeModelProvider = {
 		baseUrl: trimTrailingSlash(options.baseUrl),
 		api: options.api,
 		apiKey: options.apiKeyEnv,
 		authHeader: options.api === "openai-completions" ? true : undefined,
-		models: [createRuntimeModelEntry(options.modelId)],
 	};
+	provider.models = [createRuntimeModelEntry({ provider: options.provider, providerConfig: provider, modelId: options.modelId })];
+	return provider;
 }
 
 export function buildRuntimeModelsConfig(options: RuntimeModelConfigOptions): RuntimeModelsConfig {
@@ -168,7 +179,13 @@ export function upsertRuntimeModelsConfig(
 	};
 	const existingModels = Array.isArray(provider.models) ? [...provider.models] : [];
 	if (!existingModels.some((entry) => entry.id === options.modelId)) {
-		existingModels.push(createRuntimeModelEntry(options.modelId));
+		existingModels.push(
+			createRuntimeModelEntry({
+				provider: options.provider,
+				providerConfig: provider,
+				modelId: options.modelId,
+			}),
+		);
 	}
 	provider.models = existingModels;
 	providers[options.provider] = provider;

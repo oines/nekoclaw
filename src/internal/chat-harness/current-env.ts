@@ -132,14 +132,8 @@ interface ScenarioDefinition {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const GROUP_TITLE = "Harness Group";
-const RED_PNG_BYTES = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/lcezWQAAAABJRU5ErkJggg==",
-	"base64",
-);
-const BLUE_PNG_BYTES = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mNk+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg==",
-	"base64",
-);
+const RED_PNG_BYTES = readFileSync(new URL("./fixtures/red-square-large.png", import.meta.url));
+const BLUE_PNG_BYTES = readFileSync(new URL("./fixtures/blue-square-large.png", import.meta.url));
 const NATURAL_SCENE_PNG_BYTES = Buffer.from(
 	"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",
 	"base64",
@@ -153,6 +147,7 @@ const MIXED_SCENE_OCR_PNG_BYTES = Buffer.from(
 	"base64",
 );
 const MIXED_SCENE_FIXTURE_BYTES = readFileSync(new URL("./fixtures/mixed-scene-ocr-v2.png", import.meta.url));
+const NATURAL_SCENE_FIXTURE_BYTES = readFileSync(new URL("./fixtures/natural-scene-house-tree-sun.png", import.meta.url));
 const FILE_SECRET = "HARNESS_FILE_SECRET_731";
 const FILE_SECRET_EXTRA = "HARNESS_FILE_SECRET_992";
 const FILE_SECRET_BYTES = Buffer.from(`${FILE_SECRET}\n`, "utf-8");
@@ -677,7 +672,7 @@ async function scenarioDmImageVision(context: ScenarioContext): Promise<void> {
 		chatId: context.dmUserId,
 		senderId: context.dmUserId,
 		senderName: "Harness DM",
-		text: "Look at this image and reply with exactly: RED",
+		text: "What is the dominant color in this image? Reply with exactly: RED",
 		attachment: {
 			kind: "image",
 			name: "red-square.png",
@@ -706,7 +701,7 @@ async function scenarioDmMultiImageVision(context: ScenarioContext): Promise<voi
 		chatId: context.dmUserId,
 		senderId: context.dmUserId,
 		senderName: "Harness DM",
-		text: "You received two images in one message. Reply with exactly: RED,BLUE",
+		text: "You received two solid-color images in one message. Reply with exactly: RED,BLUE",
 		attachments: [
 			{
 				kind: "image",
@@ -748,7 +743,7 @@ async function scenarioDmNaturalImageDescription(context: ScenarioContext): Prom
 			kind: "image",
 			name: "natural-scene.png",
 			mimeType: "image/png",
-			bytes: NATURAL_SCENE_PNG_BYTES,
+			bytes: NATURAL_SCENE_FIXTURE_BYTES,
 		},
 	});
 	assertCondition(
@@ -756,6 +751,44 @@ async function scenarioDmNaturalImageDescription(context: ScenarioContext): Prom
 		"Expected the natural image to be persisted into the session attachments directory",
 	);
 	await expectLatestOutboundContainsAll(context, context.dmUserId, [/tree/i, /house/i, /sun/i]);
+}
+
+async function scenarioDmNaturalImageRestateChinese(context: ScenarioContext): Promise<void> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "pair me",
+	});
+	const session = await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "复述这张图片的内容。先直接说画面里有什么，不要写抒情句，不要写模板，不要写方括号占位，也不要猜测看不见的细节。",
+		attachment: {
+			kind: "image",
+			name: "natural-scene.png",
+			mimeType: "image/png",
+			bytes: NATURAL_SCENE_FIXTURE_BYTES,
+		},
+	});
+	assertCondition(
+		listSessionAttachmentNames(context, session.sessionRecordId).length > 0,
+		"Expected the Chinese restate image to be persisted into the session attachments directory",
+	);
+	await waitForQueueIdle(context);
+	const outbound = latestOutbound(context.driver, context.dmUserId);
+	assertCondition(outbound, `Expected outbound message for chat ${context.dmUserId}`);
+	const text = outbound.text ?? "";
+	assertCondition(!/[\[\]【】]/.test(text), `Expected no placeholder brackets in Chinese image restate reply, got "${text}"`);
+	assertCondition(!/(此处根据|例如|比如|点睛之笔|让我看看这张照片)/.test(text), `Expected no canned template phrasing, got "${text}"`);
+	assertCondition(
+		/(树|tree)/i.test(text) && /(房|屋|house)/i.test(text) && /(太阳|sun)/i.test(text),
+		`Expected the Chinese image restate reply to mention the visible tree/house/sun, got "${text}"`,
+	);
 }
 
 async function scenarioDmFileAttachment(context: ScenarioContext): Promise<void> {
@@ -860,6 +893,7 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "dm_image_vision", channel: "telegram", run: scenarioDmImageVision },
 	{ name: "dm_multi_image_vision", channel: "telegram", run: scenarioDmMultiImageVision },
 	{ name: "dm_natural_image_description", channel: "telegram", run: scenarioDmNaturalImageDescription },
+	{ name: "dm_natural_image_restate_cn", channel: "telegram", run: scenarioDmNaturalImageRestateChinese },
 	{ name: "dm_file_attachment", channel: "telegram", run: scenarioDmFileAttachment },
 	{ name: "dm_multi_file_attachment", channel: "telegram", run: scenarioDmMultiFileAttachment },
 	{ name: "dm_image_text_mixed", channel: "telegram", run: scenarioDmImageTextMixed },
@@ -877,6 +911,7 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "dm_image_vision", channel: "napcat", run: scenarioDmImageVision },
 	{ name: "dm_multi_image_vision", channel: "napcat", run: scenarioDmMultiImageVision },
 	{ name: "dm_natural_image_description", channel: "napcat", run: scenarioDmNaturalImageDescription },
+	{ name: "dm_natural_image_restate_cn", channel: "napcat", run: scenarioDmNaturalImageRestateChinese },
 	{ name: "dm_file_attachment", channel: "napcat", run: scenarioDmFileAttachment },
 	{ name: "dm_multi_file_attachment", channel: "napcat", run: scenarioDmMultiFileAttachment },
 	{ name: "dm_image_text_mixed", channel: "napcat", run: scenarioDmImageTextMixed },
