@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import { JsonNekoclawStore } from "../store/json-store.js";
-import type { ChannelPlugin, ChannelSessionAddress, ChannelType, InboundMessageEvent, PairRequest } from "../types.js";
+import type { PairRequest } from "../types/agent.js";
+import type { ChannelPlugin } from "../types/channel.js";
+import type { ChannelType } from "../types/common.js";
+import type { InboundMessageEvent } from "../types/message.js";
+import type { ChannelSessionAddress } from "../types/session.js";
 import { nowIso } from "../store/helpers.js";
 import { CommandRouterService } from "./command-router.js";
 import { isRuntimeBackpressureError } from "./errors.js";
@@ -56,13 +60,13 @@ export class MessageRouterService {
 		const canProcessNormally = plugin?.triggering.shouldProcessEvent(hydratedEvent) ?? true;
 		if (session) {
 			if (hydratedEvent.chatKind === "group" && hydratedEvent.chatTitle?.trim()) {
-				this.store.updateSessionChatTitle(agent.agentId, session.sessionRecordId, hydratedEvent.chatTitle);
+				this.store.services.sessions.updateSessionChatTitle(agent.agentId, session.sessionRecordId, hydratedEvent.chatTitle);
 			}
-			this.store.updateSessionLastRoute(agent.agentId, session.sessionRecordId, {
+			this.store.services.sessions.updateSessionLastRoute(agent.agentId, session.sessionRecordId, {
 				externalConversationId: sessionAddress.externalConversationId,
 				threadId: sessionAddress.threadId,
 			});
-			this.store.appendSessionLog(agent.agentId, session.sessionRecordId, {
+			this.store.services.sessions.appendSessionLog(agent.agentId, session.sessionRecordId, {
 				timestamp: nowIso(),
 				type: hydratedEvent.eventType,
 				channel: channel.type,
@@ -135,7 +139,7 @@ export class MessageRouterService {
 			});
 			return;
 		}
-		const pair = this.store.createOrReusePair(agent.agentId, {
+		const pair = this.store.services.pairing.createOrReusePair(agent.agentId, {
 			channelType: channel.type,
 			externalConversationId: sessionAddress.externalConversationId,
 			chatKind: sessionAddress.chatKind,
@@ -159,7 +163,7 @@ export class MessageRouterService {
 			chatKind: pair.chatKind,
 			payload: plugin.pairing.buildPairPrompt(pair),
 		});
-		this.store.touchPairPrompt(pair.pairingId);
+		this.store.services.pairing.touchPairPrompt(pair.pairingId);
 		this.store.audit(agent.agentId, "pair.prompted", {
 			code: pair.code,
 			channel: channel.type,

@@ -103,6 +103,8 @@ describe("worker append prompt", () => {
 		expect(prompt).toContain("already matched as being addressed to you");
 		expect(prompt).toContain("Use the `send_message` tool");
 		expect(prompt).toContain("Use the `cron` tool");
+		expect(prompt).toContain("Routing examples:");
+		expect(prompt).toContain("Reply to the current user normally -> output plain text.");
 		expect(prompt).toContain("Asia/Shanghai");
 	});
 
@@ -132,6 +134,7 @@ describe("worker append prompt", () => {
 		const prompt = buildAppendPrompt(payload, "", "");
 		expect(prompt).toContain("## Persona Index");
 		expect(prompt).toContain("## Current Scene Observations");
+		expect(prompt).toContain("`SOUL.md` is the primary source for your style, voice, and personality.");
 		expect(prompt).toContain("use the built-in `read` tool");
 		expect(prompt).toContain("file path referenced in index.md");
 		expect(prompt).not.toContain("## Persona Selection Notes");

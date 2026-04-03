@@ -1,29 +1,77 @@
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
-import { hasOutboundContent } from "../messages.js";
+import { hasOutboundContent, summarizeBlocks } from "../messages.js";
 import { MODEL_ENV_MAP } from "../model/provider-key.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
-import type { AgentSpec, ChannelPlugin, RunJob, WorkerPayload, WorkerResult } from "../types.js";
+import type { AgentSpec, ChannelPlugin, ReplyPayload, RunJob, SessionRecord, WorkerPayload, WorkerResult } from "../types.js";
 import { runWorkerInContainer } from "./docker.js";
 import { OutboundDispatchService } from "./outbound-dispatch.js";
 import { PersonaMemoryService } from "./persona-memory.js";
+import { parseTargetRef } from "./runtime-directory.js";
 import { RuntimeDirectoryService } from "./runtime-directory.js";
 import { getRuntimeKey } from "./runtime-key.js";
 
-export function collectToolActionReplyText(result: WorkerResult): string {
-	return (result.toolActions ?? [])
-		.filter((action): action is Extract<NonNullable<WorkerResult["toolActions"]>[number], { kind: "send" | "reply" }> =>
-			action.kind === "send" || action.kind === "reply",
-		)
-		.map((action) => {
-			const parts: string[] = [];
-			if (action.payload.text?.trim()) parts.push(action.payload.text.trim());
-			for (const att of action.payload.attachments ?? []) {
-				parts.push(`[${att.kind === "image" ? "image" : "file"}: ${att.name ?? att.mimeType ?? "attachment"}]`);
-			}
-			return parts.join("\n");
-		})
-		.filter(Boolean)
-		.join("\n\n");
+function summarizeReplyPayload(payload: ReplyPayload): string[] {
+	const lines: string[] = [];
+	if (payload.text?.trim()) {
+		lines.push(`- Text: ${payload.text.trim()}`);
+	}
+	for (const att of payload.attachments ?? []) {
+		lines.push(`- ${att.kind === "image" ? "Image" : "File"}: ${att.name ?? att.mimeType ?? "attachment"}`);
+	}
+	return lines;
+}
+
+function formatTranscriptTurn(speaker: string, lines: string[]): string | undefined {
+	if (lines.length === 0) {
+		return undefined;
+	}
+	return `${speaker}:\n${lines.join("\n")}`;
+}
+
+function isCurrentSessionTarget(target: string, session: Pick<SessionRecord, "channelType" | "chatKind" | "externalConversationId">): boolean {
+	const parsed = parseTargetRef(target);
+	if (!parsed) {
+		return false;
+	}
+	return (
+		parsed.channelType === session.channelType &&
+		parsed.chatKind === session.chatKind &&
+		parsed.externalConversationId === session.externalConversationId
+	);
+}
+
+export function buildFormationTurnTranscript(
+	job: Pick<RunJob, "event">,
+	session: Pick<SessionRecord, "channelType" | "chatKind" | "externalConversationId">,
+	result: WorkerResult,
+): string {
+	const transcriptTurns: string[] = [];
+	const userTurn = formatTranscriptTurn("User", summarizeBlocks(job.event.blocks));
+	if (userTurn) {
+		transcriptTurns.push(userTurn);
+	}
+
+	for (const action of result.toolActions ?? []) {
+		if (action.kind !== "send" && action.kind !== "reply" && action.kind !== "send_targeted") {
+			continue;
+		}
+		if (action.kind === "send_targeted" && !isCurrentSessionTarget(action.target, session)) {
+			continue;
+		}
+		const botTurn = formatTranscriptTurn("Bot", summarizeReplyPayload(action.payload));
+		if (botTurn) {
+			transcriptTurns.push(botTurn);
+		}
+	}
+
+	const outboundTurn = hasOutboundContent(result.outbound)
+		? formatTranscriptTurn("Bot", summarizeReplyPayload(result.outbound))
+		: undefined;
+	if (outboundTurn && !transcriptTurns.includes(outboundTurn)) {
+		transcriptTurns.push(outboundTurn);
+	}
+
+	return transcriptTurns.join("\n\n");
 }
 
 function parseWorkerResult(stdout: string): WorkerResult {
@@ -97,14 +145,12 @@ export class WorkerRunnerService {
 			if (hasOutboundContent(result.outbound)) {
 				await this.outbound.sendToSession(agent, session, job.event, result.outbound);
 			}
-			const replyText = [result.outbound.text?.trim(), collectToolActionReplyText(result)]
-				.filter((value): value is string => Boolean(value))
-				.join("\n\n");
+			const turnTranscript = buildFormationTurnTranscript(job, session, result);
 			this.personaMemory.scheduleFormation({
 				agent,
 				session,
 				event: job.event,
-				replyText,
+				turnTranscript,
 				personaContext,
 				effectiveModel,
 			});

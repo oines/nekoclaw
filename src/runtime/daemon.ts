@@ -1,7 +1,10 @@
 import { inspectContainerStatus, ensureAgentContainer, removeAgentContainer, stopAgentContainer } from "./docker.js";
-import type { ChannelPlugin } from "../types.js";
+import type { AgentSpec, PairRequest } from "../types/agent.js";
+import type { ChannelPlugin } from "../types/channel.js";
+import type { ChannelType } from "../types/common.js";
+import type { InboundMessageEvent } from "../types/message.js";
+import type { RunJob } from "../types/runtime.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
-import type { AgentSpec, ChannelType, InboundMessageEvent, PairRequest, RunJob } from "../types.js";
 import { nowIso } from "../store/helpers.js";
 import { ChannelRuntimeService } from "./channel-runtime.js";
 import { CommandRouterService } from "./command-router.js";
@@ -208,19 +211,19 @@ export class NekoclawDaemon {
 						timezone: cron.timezone,
 						scheduledFor,
 					},
-				});
-				if (cron.scheduleKind === "once") {
-					this.store.completeCron(cron.cronId, nowIso());
-				} else {
-					this.store.advanceDailyCron(cron.cronId, nowIso());
-				}
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				if (/Unknown session/.test(message)) {
-					this.store.invalidateCron(cron.cronId, "missing_session");
-					continue;
-				}
-				this.store.audit(cron.agentId, "cron.poll_error", {
+					});
+					if (cron.scheduleKind === "once") {
+						this.store.services.crons.completeCron(cron.cronId, nowIso());
+					} else {
+						this.store.services.crons.advanceDailyCron(cron.cronId, nowIso());
+					}
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					if (/Unknown session/.test(message)) {
+						this.store.services.crons.invalidateCron(cron.cronId, "missing_session");
+						continue;
+					}
+					this.store.audit(cron.agentId, "cron.poll_error", {
 					cronId: cron.cronId,
 					error: message,
 				});

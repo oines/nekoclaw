@@ -1,4 +1,3 @@
-import { NEKOCLAW_RUNTIME_CONTROL_DIR } from "../config.js";
 import type {
 	AgentSpec,
 	AdminIdentity,
@@ -23,11 +22,19 @@ import { AuditStore } from "./audit-store.js";
 import { ChannelStore } from "./channel-store.js";
 import { ConfigRepository } from "./config-repository.js";
 import { CronStore } from "./cron-store.js";
-import { nowIso } from "./helpers.js";
 import { ModelStore } from "./model-store.js";
 import { PairStore } from "./pair-store.js";
 import { StorePaths } from "./paths.js";
 import { RuntimeStateStore } from "./runtime-state-store.js";
+import {
+	AgentLifecycleService,
+	ChannelLifecycleService,
+	ContentService,
+	CronLifecycleService,
+	PairingService,
+	RuntimeControlStoreService,
+	SessionLifecycleService,
+} from "./services/index.js";
 import { SessionStore } from "./session-store.js";
 
 export { CreateAgentInput, UpdateAgentInput };
@@ -52,6 +59,27 @@ export class JsonNekoclawStore {
 	private readonly runtime = new RuntimeStateStore(this.paths);
 
 	private readonly crons = new CronStore(this.paths);
+
+	private readonly sessionLifecycle = new SessionLifecycleService(this.sessions, this.crons, this.audits);
+
+	readonly services = {
+		agents: new AgentLifecycleService(
+			this.agents,
+			this.channels,
+			this.sessions,
+			this.sessionLifecycle,
+			this.crons,
+			this.pairs,
+			this.runtime,
+			this.audits,
+		),
+		channels: new ChannelLifecycleService(this.agents, this.channels, this.sessions, this.sessionLifecycle, this.audits),
+		sessions: this.sessionLifecycle,
+		pairing: new PairingService(this.agents, this.sessions, this.sessionLifecycle, this.pairs, this.audits),
+		crons: new CronLifecycleService(this.sessions, this.crons, this.audits),
+		content: new ContentService(this.agents, this.models, this.audits),
+		runtime: new RuntimeControlStoreService(this.runtime),
+	};
 
 	// #region Filesystem Paths
 
@@ -220,37 +248,15 @@ export class JsonNekoclawStore {
 	// #region Agent Mutators
 
 	createAgent(input: CreateAgentInput): AgentSpec {
-		const agent = this.agents.createAgent(input);
-		this.runtime.writeRuntimeState({
-			agentId: agent.agentId,
-			containerStatus: "missing",
-			updatedAt: nowIso(),
-		});
-		this.audit(agent.agentId, "agent.created", { slug: agent.slug });
-		return agent;
+		return this.services.agents.createAgent(input);
 	}
 
 	updateAgent(ref: string, patch: UpdateAgentInput): AgentSpec {
-		const agent = this.agents.updateAgent(ref, patch);
-		this.audit(agent.agentId, "agent.updated", patch as Record<string, unknown>);
-		return agent;
+		return this.services.agents.updateAgent(ref, patch);
 	}
 
 	deleteAgent(ref: string, options?: { force?: boolean }): AgentSpec {
-		const agent = this.getAgentByRef(ref);
-		const activeChannels = this.listChannels(agent.agentId);
-		const activeSessions = this.listSessions(agent.agentId);
-		if (!options?.force && (activeChannels.length > 0 || activeSessions.length > 0)) {
-			throw new Error(`Agent "${agent.slug}" still has channels or sessions. Use --force to remove it.`);
-		}
-		for (const session of activeSessions) {
-			this.removeSession(agent.agentId, session.sessionRecordId, { purge: true });
-		}
-		this.crons.deleteCronsForAgent(agent.agentId);
-		this.pairs.deletePairsForAgent(agent.agentId);
-		this.runtime.removeAgentArtifacts(agent.agentId);
-		this.agents.removeWorkspace(agent.slug);
-		return this.agents.deleteAgentConfig(agent.agentId);
+		return this.services.agents.deleteAgent(ref, options);
 	}
 
 	// #endregion
@@ -266,30 +272,15 @@ export class JsonNekoclawStore {
 	}
 
 	createChannel(agentRef: string, type: ChannelType): ChannelSpec {
-		const channel = this.channels.createChannel(agentRef, type);
-		this.audit(channel.agentId, "channel.created", { type });
-		return channel;
+		return this.services.channels.createChannel(agentRef, type);
 	}
 
 	removeChannel(agentRef: string, type: ChannelType, options?: { force?: boolean }): ChannelSpec {
-		const agent = this.getAgentByRef(agentRef);
-		const channel = this.getChannel(agent.agentId, type);
-		const sessions = this.listSessions(agent.agentId).filter((session) => session.channelType === type);
-		if (!options?.force && sessions.length > 0) {
-			throw new Error(`The ${type} channel still has paired sessions. Remove them first or use --force.`);
-		}
-		for (const session of sessions) {
-			this.removeSession(agent.agentId, session.sessionRecordId, { purge: true });
-		}
-		const removed = this.channels.removeChannel(agentRef, type);
-		this.audit(agent.agentId, "channel.removed", { type });
-		return removed ?? channel;
+		return this.services.channels.removeChannel(agentRef, type, options);
 	}
 
 	setChannelToken(agentRef: string, type: ChannelType, token: string): void {
-		this.channels.setChannelToken(agentRef, type, token);
-		const agent = this.getAgentByRef(agentRef);
-		this.audit(agent.agentId, "channel.token_saved", { type });
+		this.services.channels.setChannelToken(agentRef, type, token);
 	}
 
 	getChannelToken(agentId: string, type: ChannelType): string | undefined {
@@ -305,22 +296,11 @@ export class JsonNekoclawStore {
 	}
 
 	setNapcatEndpoint(agentRef: string, input: { wsUrl: string; selfId?: string }): void {
-		this.channels.setNapcatEndpoint(agentRef, input);
-		const agent = this.getAgentByRef(agentRef);
-		this.audit(agent.agentId, "channel.endpoint_saved", {
-			type: "napcat",
-			wsUrl: input.wsUrl,
-			selfId: input.selfId,
-		});
+		this.services.channels.setNapcatEndpoint(agentRef, input);
 	}
 
 	setChannelGroupTrigger(agentRef: string, type: ChannelType, groupTrigger: "all" | "mention"): void {
-		this.channels.setGroupTrigger(agentRef, type, groupTrigger);
-		const agent = this.getAgentByRef(agentRef);
-		this.audit(agent.agentId, "channel.group_trigger_saved", {
-			type,
-			groupTrigger,
-		});
+		this.services.channels.setChannelGroupTrigger(agentRef, type, groupTrigger);
 	}
 
 	// #endregion
@@ -359,14 +339,7 @@ export class JsonNekoclawStore {
 			sessionKey?: string;
 		},
 	): SessionRecord {
-		const session = this.sessions.createSession(agentRef, input);
-		this.audit(session.agentId, "session.created", {
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-			channelType: session.channelType,
-			chatKind: session.chatKind,
-		});
-		return session;
+		return this.services.sessions.createSession(agentRef, input);
 	}
 
 	updateSessionLastRoute(
@@ -374,17 +347,11 @@ export class JsonNekoclawStore {
 		sessionRef: string,
 		input: { externalConversationId: string; threadId?: string },
 	): SessionRecord {
-		return this.sessions.updateSessionLastRoute(agentRef, sessionRef, input);
+		return this.services.sessions.updateSessionLastRoute(agentRef, sessionRef, input);
 	}
 
 	updateSessionChatTitle(agentRef: string, sessionRef: string, chatTitle: string): SessionRecord {
-		const session = this.sessions.updateSessionChatTitle(agentRef, sessionRef, chatTitle);
-		this.audit(session.agentId, "session.chat_title_updated", {
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-			chatTitle: session.chatTitle,
-		});
-		return session;
+		return this.services.sessions.updateSessionChatTitle(agentRef, sessionRef, chatTitle);
 	}
 
 	setSessionModelOverride(
@@ -392,46 +359,19 @@ export class JsonNekoclawStore {
 		sessionRef: string,
 		input: { provider: string; modelId: string },
 	): SessionRecord {
-		const session = this.sessions.setSessionModelOverride(agentRef, sessionRef, input);
-		this.audit(session.agentId, "session.model_override_set", {
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-			provider: input.provider,
-			modelId: input.modelId,
-		});
-		return session;
+		return this.services.sessions.setSessionModelOverride(agentRef, sessionRef, input);
 	}
 
 	clearSessionModelOverride(agentRef: string, sessionRef: string): SessionRecord {
-		const session = this.sessions.clearSessionModelOverride(agentRef, sessionRef);
-		this.audit(session.agentId, "session.model_override_cleared", {
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-		});
-		return session;
+		return this.services.sessions.clearSessionModelOverride(agentRef, sessionRef);
 	}
 
 	resetSession(agentRef: string, sessionRef: string): SessionRecord {
-		const session = this.sessions.resetSession(agentRef, sessionRef);
-		const invalidated = this.crons.invalidateSessionCrons(session.agentId, session.sessionRecordId);
-		this.audit(session.agentId, "session.reset", {
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-			resetGeneration: session.resetGeneration,
-			invalidatedCronCount: invalidated.length,
-		});
-		return session;
+		return this.services.sessions.resetSession(agentRef, sessionRef);
 	}
 
 	removeSession(agentRef: string, ref: string, options?: { purge?: boolean }): SessionRecord {
-		const session = this.sessions.removeSession(agentRef, ref, options);
-		this.crons.invalidateSessionCrons(session.agentId, session.sessionRecordId);
-		this.audit(session.agentId, "session.removed", {
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-			purge: Boolean(options?.purge),
-		});
-		return session;
+		return this.services.sessions.removeSession(agentRef, ref, options);
 	}
 
 	listActiveSessionCrons(agentRef: string, sessionRef: string): SessionCronRecord[] {
@@ -452,36 +392,11 @@ export class JsonNekoclawStore {
 			minute?: number;
 		},
 	): SessionCronRecord {
-		const session = this.getSession(agentRef, sessionRef);
-		const cron = this.crons.createSessionCron({
-			...input,
-			agentId: session.agentId,
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-			channelType: session.channelType,
-			chatKind: session.chatKind,
-			externalConversationId: session.externalConversationId,
-			threadId: session.threadId,
-			chatTitle: session.chatTitle,
-			createdFromResetGeneration: session.resetGeneration,
-		});
-		this.audit(session.agentId, "cron.created", {
-			cronId: cron.cronId,
-			sessionRecordId: session.sessionRecordId,
-			scheduleKind: cron.scheduleKind,
-			nextRunAt: cron.nextRunAt,
-		});
-		return cron;
+		return this.services.crons.createSessionCron(agentRef, sessionRef, input);
 	}
 
 	cancelSessionCron(agentRef: string, sessionRef: string, cronId: string): SessionCronRecord {
-		const session = this.getSession(agentRef, sessionRef);
-		const cron = this.crons.cancelSessionCron(session.agentId, session.sessionRecordId, cronId);
-		this.audit(session.agentId, "cron.canceled", {
-			cronId: cron.cronId,
-			sessionRecordId: session.sessionRecordId,
-		});
-		return cron;
+		return this.services.crons.cancelSessionCron(agentRef, sessionRef, cronId);
 	}
 
 	listDueCrons(at?: Date): SessionCronRecord[] {
@@ -489,34 +404,15 @@ export class JsonNekoclawStore {
 	}
 
 	completeCron(cronId: string, triggeredAt: string): SessionCronRecord {
-		const cron = this.crons.completeCron(cronId, triggeredAt);
-		this.audit(cron.agentId, "cron.completed", {
-			cronId: cron.cronId,
-			sessionRecordId: cron.sessionRecordId,
-			triggeredAt,
-		});
-		return cron;
+		return this.services.crons.completeCron(cronId, triggeredAt);
 	}
 
 	advanceDailyCron(cronId: string, triggeredAt: string): SessionCronRecord {
-		const cron = this.crons.advanceDailyCron(cronId, triggeredAt);
-		this.audit(cron.agentId, "cron.advanced", {
-			cronId: cron.cronId,
-			sessionRecordId: cron.sessionRecordId,
-			triggeredAt,
-			nextRunAt: cron.nextRunAt,
-		});
-		return cron;
+		return this.services.crons.advanceDailyCron(cronId, triggeredAt);
 	}
 
 	invalidateCron(cronId: string, reason?: string): SessionCronRecord {
-		const cron = this.crons.invalidateCron(cronId);
-		this.audit(cron.agentId, "cron.invalidated", {
-			cronId: cron.cronId,
-			sessionRecordId: cron.sessionRecordId,
-			reason,
-		});
-		return cron;
+		return this.services.crons.invalidateCron(cronId, reason);
 	}
 
 	getCron(cronId: string): SessionCronRecord | undefined {
@@ -550,111 +446,66 @@ export class JsonNekoclawStore {
 			ttlMinutes?: number;
 		},
 	): PairRequest {
-		const agent = this.getAgentByRef(agentRef);
-		const pair = this.pairs.createOrReusePair(agent.agentId, {
-			...input,
-			sessionKey:
-				input.sessionKey ||
-				this.resolveSessionKey(agent.agentId, {
-					channelType: input.channelType,
-					externalConversationId: input.externalConversationId,
-					chatKind: input.chatKind,
-					threadId: input.threadId,
-					parentSessionKey: input.parentSessionKey,
-				}),
-		});
-		this.audit(agent.agentId, "pair.created", {
-			code: pair.code,
-			sessionKey: pair.sessionKey,
-			channelType: pair.channelType,
-			chatKind: pair.chatKind,
-		});
-		return pair;
+		return this.services.pairing.createOrReusePair(agentRef, input);
 	}
 
 	touchPairPrompt(pairingId: string): PairRequest {
-		return this.pairs.touchPairPrompt(pairingId);
+		return this.services.pairing.touchPairPrompt(pairingId);
 	}
 
 	getPairByCode(code: string): PairRequest {
-		return this.pairs.getPairByCode(code);
+		return this.services.pairing.getPairByCode(code);
 	}
 
 	acceptPair(code: string): { pair: PairRequest; session: SessionRecord } {
-		const pair = this.getPairByCode(code);
-		const session = this.createSession(pair.agentId, {
-			channelType: pair.channelType,
-			externalConversationId: pair.externalConversationId,
-			chatKind: pair.chatKind,
-			chatTitle: pair.chatTitle,
-			threadId: pair.threadId,
-			parentSessionKey: pair.parentSessionKey,
-			sessionKey: pair.sessionKey,
-		});
-		const updated = this.pairs.markAccepted(code);
-		this.audit(pair.agentId, "pair.accepted", {
-			code,
-			sessionRecordId: session.sessionRecordId,
-			sessionKey: session.sessionKey,
-		});
-		return { pair: updated, session };
+		return this.services.pairing.acceptPair(code);
 	}
 
 	rejectPair(code: string): PairRequest {
-		const pair = this.pairs.markRejected(code);
-		this.audit(pair.agentId, "pair.rejected", { code });
-		return pair;
+		return this.services.pairing.rejectPair(code);
 	}
 
 	deletePairRequestsForAgent(agentId: string): void {
-		this.pairs.deletePairsForAgent(agentId);
+		this.services.pairing.deletePairRequestsForAgent(agentId);
 	}
 
 	readSoul(agentRef: string): string {
-		return this.agents.readSoul(agentRef);
+		return this.services.content.readSoul(agentRef);
 	}
 
 	readAgents(agentRef: string): string {
-		return this.agents.readAgents(agentRef);
+		return this.services.content.readAgents(agentRef);
 	}
 
 	writeSoul(agentRef: string, content: string): void {
-		const agent = this.getAgentByRef(agentRef);
-		this.agents.writeSoul(agentRef, content);
-		this.audit(agent.agentId, "soul.updated", {});
+		this.services.content.writeSoul(agentRef, content);
 	}
 
 	readMemory(agentRef: string): string {
-		return this.agents.readMemory(agentRef);
+		return this.services.content.readMemory(agentRef);
 	}
 
 	writeMemory(agentRef: string, content: string): void {
-		const agent = this.getAgentByRef(agentRef);
-		this.agents.writeMemory(agentRef, content);
-		this.audit(agent.agentId, "memory.updated", {});
+		this.services.content.writeMemory(agentRef, content);
 	}
 
 	readRuntimeModelsConfig(agentRef: string): Record<string, unknown> | undefined {
-		return this.models.readRuntimeModelsConfig(agentRef);
+		return this.services.content.readRuntimeModelsConfig(agentRef);
 	}
 
 	writeRuntimeModelsConfig(agentRef: string, config: Record<string, unknown>, details: Record<string, unknown>): void {
-		const agent = this.getAgentByRef(agentRef);
-		this.models.writeRuntimeModelsConfig(agentRef, config);
-		this.audit(agent.agentId, "model.runtime_updated", details);
+		this.services.content.writeRuntimeModelsConfig(agentRef, config, details);
 	}
 
 	getModelConfig(agentRef: string): ModelConfig | undefined {
-		return this.models.getModelConfig(agentRef);
+		return this.services.content.getModelConfig(agentRef);
 	}
 
 	setBuiltinModelConfig(
 		agentRef: string,
 		input: { provider: string; modelId: string; apiKey?: string; thinkingLevel?: AgentSpec["thinkingLevel"] },
 	): AgentSpec {
-		const agent = this.models.setBuiltinModelConfig(agentRef, input);
-		this.audit(agent.agentId, "model.updated", { provider: input.provider, modelId: input.modelId, kind: "builtin" });
-		return agent;
+		return this.services.content.setBuiltinModelConfig(agentRef, input);
 	}
 
 	setCustomModelConfig(
@@ -668,15 +519,7 @@ export class JsonNekoclawStore {
 			thinkingLevel?: AgentSpec["thinkingLevel"];
 		},
 	): AgentSpec {
-		const agent = this.models.setCustomModelConfig(agentRef, input);
-		this.audit(agent.agentId, "model.updated", {
-			baseUrl: input.baseUrl,
-			api: input.api,
-			providerId: input.providerId,
-			modelId: input.modelId,
-			kind: "custom",
-		});
-		return agent;
+		return this.services.content.setCustomModelConfig(agentRef, input);
 	}
 
 	getProviderKey(agentId: string, provider: string): string | undefined {
@@ -688,57 +531,57 @@ export class JsonNekoclawStore {
 	}
 
 	getRuntimeState(agentId: string): RuntimeState {
-		return this.runtime.getRuntimeState(agentId);
+		return this.services.runtime.getRuntimeState(agentId);
 	}
 
 	writeRuntimeState(state: RuntimeState): void {
-		this.runtime.writeRuntimeState(state);
+		this.services.runtime.writeRuntimeState(state);
 	}
 
 	getRuntimeProcessState(): RuntimeProcessState {
-		return this.runtime.getRuntimeProcessState();
+		return this.services.runtime.getRuntimeProcessState();
 	}
 
 	writeRuntimeProcessState(state: RuntimeProcessState, options?: { skipLock?: boolean }): void {
-		this.runtime.writeRuntimeProcessState(state, options);
+		this.services.runtime.writeRuntimeProcessState(state, options);
 	}
 
 	createRuntimeControlAction(
 		action: Omit<RuntimeControlAction, "requestId" | "status" | "requestedAt" | "updatedAt">,
 	): RuntimeControlAction {
-		return this.runtime.createRuntimeControlAction(action);
+		return this.services.runtime.createRuntimeControlAction(action);
 	}
 
 	getRuntimeControlAction(requestId: string): RuntimeControlAction | undefined {
-		return this.runtime.getRuntimeControlAction(requestId);
+		return this.services.runtime.getRuntimeControlAction(requestId);
 	}
 
 	listPendingRuntimeControlActions(): RuntimeControlAction[] {
-		return this.runtime.listPendingRuntimeControlActions(NEKOCLAW_RUNTIME_CONTROL_DIR);
+		return this.services.runtime.listPendingRuntimeControlActions();
 	}
 
 	writeRuntimeControlAction(action: RuntimeControlAction): void {
-		this.runtime.writeRuntimeControlAction(action);
+		this.services.runtime.writeRuntimeControlAction(action);
 	}
 
 	deleteRuntimeControlAction(requestId: string): void {
-		this.runtime.deleteRuntimeControlAction(requestId);
+		this.services.runtime.deleteRuntimeControlAction(requestId);
 	}
 
 	appendQueueEvent(agentId: string, event: QueueEvent): void {
-		this.runtime.appendQueueEvent(agentId, event);
+		this.services.runtime.appendQueueEvent(agentId, event);
 	}
 
 	getQueueEvents(agentId: string): QueueEvent[] {
-		return this.runtime.getQueueEvents(agentId);
+		return this.services.runtime.getQueueEvents(agentId);
 	}
 
 	rewriteQueueEvents(agentId: string, events: QueueEvent[]): void {
-		this.runtime.rewriteQueueEvents(agentId, events);
+		this.services.runtime.rewriteQueueEvents(agentId, events);
 	}
 
 	recoverPendingJobs(agentId: string): RunJob[] {
-		return this.runtime.recoverPendingJobs(agentId);
+		return this.services.runtime.recoverPendingJobs(agentId);
 	}
 
 	audit(agentId: string, kind: string, details: Record<string, unknown>): AuditEntry {
@@ -750,6 +593,6 @@ export class JsonNekoclawStore {
 	}
 
 	appendSessionLog(agentRef: string, sessionRecordId: string, value: unknown): void {
-		this.sessions.appendSessionLog(agentRef, sessionRecordId, value);
+		this.services.sessions.appendSessionLog(agentRef, sessionRecordId, value);
 	}
 }

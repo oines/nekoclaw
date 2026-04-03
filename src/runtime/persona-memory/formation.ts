@@ -1,29 +1,27 @@
 export function buildFormationTurnPrompt(input: {
 	sceneRef: string;
-	replyText: string;
+	turnTranscript: string;
 	sceneMemoryPath: string;
 	memoryManifestText: string;
 }): string {
 	return [
 		`Maintain persona memory for scene ${input.sceneRef}.`,
 		"",
-		"Use tools to inspect and revise the temporary persona workspace.",
-		"Start by inspecting:",
+		"Task: inspect the temporary persona workspace and update memory for this scene.",
+		"Inspect first:",
 		"- index.md",
 		`- observations/${input.sceneRef}.log`,
 		`- ${input.sceneMemoryPath} (if it exists)`,
 		"",
 		"Observation line format: [ISO_TIMESTAMP] channelType:senderId displayName: content",
 		"The last line in the observation file is the message that just triggered this formation run.",
-		`The bot's reply to that message was:\n${input.replyText || "(none)"}`,
+		"Full visible transcript for this run:",
+		input.turnTranscript || "(none)",
 		"",
 		"Goals:",
-		"- Preserve persona memory as Markdown prose.",
-		"- Update index.md and any relevant people/scenes files using edit.",
-		"- You may create a new people/scenes file with write if needed.",
-		"- Ensure every people/scenes file you touch has YAML frontmatter with stable title and a concise description for recall.",
-		"- Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
-		"- Do not delete files.",
+		"- Update index.md and the relevant people/scenes files for what changed in this scene.",
+		"- Keep memory grounded in what was actually observed in the log and in this run transcript.",
+		"- Keep every index.md person and scene entry path-bearing so the worker can read detailed files later.",
 		"- Preserve corrections, identity links, uncertainty, and whether you observed or participated.",
 		"",
 		"Memory files manifest:",
@@ -40,9 +38,9 @@ export function buildFormationBacklogPrompt(input: {
 	return [
 		`Maintain persona memory for scene ${input.sceneRef} from backlog observations.`,
 		"",
+		"Task: fold backlog observations from this scene into the relevant memory files.",
 		"Inspect index.md, the scene observation log, and any relevant memory files you need.",
-		"Revise existing files with edit, create new people/scenes files with write when necessary, and do not delete files.",
-		"Any people/scenes file you touch should have YAML frontmatter with title and description, followed by natural-language Markdown body.",
+		"Revise existing files and create new people/scenes files only when necessary.",
 		"Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
 		"Preserve corrections, identity links, uncertainty, and whether the bot was only observing.",
 		"Observation line format: [ISO_TIMESTAMP] channelType:senderId displayName: content",

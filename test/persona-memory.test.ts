@@ -397,7 +397,7 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			replyText: "记得，你之前说在做 GPU 租赁平台。",
+			turnTranscript: "User:\n- Text: 我叫张三，在做一个 GPU 租赁平台\n\nBot:\n- Text: 记得，你之前说在做 GPU 租赁平台。",
 			personaContext: context,
 		});
 		await waitForBackgroundWork();
@@ -473,7 +473,7 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			replyText: "记得，你之前说在做 GPU 租赁平台。",
+			turnTranscript: "User:\n- Text: 我叫张三，在做一个 GPU 租赁平台\n\nBot:\n- Text: 记得，你之前说在做 GPU 租赁平台。",
 			personaContext: context,
 		});
 		await waitForBackgroundWork();
@@ -685,7 +685,7 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			replyText: "好的",
+			turnTranscript: "User:\n- Text: 测试共享队列\n\nBot:\n- Text: 好的",
 			personaContext: { indexMarkdown: "", sceneObservations: "" },
 		});
 		personaMemory.queueDream(agent, { force: true });
@@ -880,7 +880,7 @@ describe("persona memory service", () => {
 		expect(content).not.toContain("napcat:");
 	});
 
-	it("formation prompt omits embedded inbound message and includes observation format hint", async () => {
+	it("formation prompt includes the full run transcript and observation format hint", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
 
@@ -926,12 +926,22 @@ describe("persona memory service", () => {
 			return { finalize: { consumeObservationLines: 50, summary: "ok" }, touchedPaths: [], deletedPaths: [] };
 		});
 
-		personaMemory.scheduleFormation({ agent, session, event, replyText: "bot reply here", personaContext: context });
+		personaMemory.scheduleFormation({
+			agent,
+			session,
+			event,
+			turnTranscript: "User:\n- Text: UNIQUE_INBOUND_TEXT_XYZ\n\nBot:\n- Text: bot reply here\n\nBot:\n- Text: second promise",
+			personaContext: context,
+		});
 		await waitForBackgroundWork();
 
 		expect(capturedPrompt).not.toContain("Current inbound message");
-		expect(capturedPrompt).not.toContain("UNIQUE_INBOUND_TEXT_XYZ");
+		expect(capturedPrompt).toContain("Task: inspect the temporary persona workspace and update memory for this scene.");
 		expect(capturedPrompt).toContain("Observation line format:");
+		expect(capturedPrompt).toContain("Full visible transcript for this run:");
+		expect(capturedPrompt).toContain("UNIQUE_INBOUND_TEXT_XYZ");
 		expect(capturedPrompt).toContain("bot reply here");
+		expect(capturedPrompt).toContain("second promise");
+		expect(capturedPrompt).not.toContain("Ensure every people/scenes file you touch has YAML frontmatter");
 	});
 	});

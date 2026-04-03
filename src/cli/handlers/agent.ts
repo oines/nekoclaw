@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { NekoclawDaemon } from "../../runtime/daemon.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import { NEKOCLAW_NAME } from "../../config.js";
-import type { AgentSpec } from "../../types.js";
+import type { AgentSpec } from "../../types/agent.js";
 import * as p from "@clack/prompts";
 import { ask, requireValue, type AgentCreateOptions, type ForceOptions } from "./shared.js";
 import { requestBackgroundRuntimeRemoval } from "./runtime.js";
@@ -62,7 +62,7 @@ Last error: ${agent.lastError ?? "-"}`,
 }
 
 export async function handleAgentCreate(name: string, _options: AgentCreateOptions, store: JsonNekoclawStore): Promise<void> {
-	const agent = store.createAgent({
+	const agent = store.services.agents.createAgent({
 		slug: requireValue(name, "agent name"),
 	});
 	p.log.success(`Created agent workspace for "${agent.slug}"`);
@@ -103,13 +103,13 @@ export async function handleAgentEnable(agentRef: string, store: JsonNekoclawSto
 	if (issues.length > 0) {
 		throw new Error(issues.join("\n"));
 	}
-	const agent = store.updateAgent(agentRef, { enabled: true, lastError: null });
+	const agent = store.services.agents.updateAgent(agentRef, { enabled: true, lastError: null });
 	console.log(chalk.green(`${agent.slug} is now enabled`));
 	console.log(`Run "${NEKOCLAW_NAME} start" to bring enabled agents online.`);
 }
 
 export async function handleAgentDisable(agentRef: string, store: JsonNekoclawStore, daemon: NekoclawDaemon): Promise<void> {
-	const agent = store.updateAgent(requireValue(agentRef, "agent"), { enabled: false });
+	const agent = store.services.agents.updateAgent(requireValue(agentRef, "agent"), { enabled: false });
 	await daemon.stopAgentContainer(agent.agentId);
 	console.log(chalk.green(`${agent.slug} is now disabled`));
 }
@@ -125,6 +125,6 @@ export async function handleAgentRemove(agentRef: string, options: ForceOptions,
 	if (!removedByBackground) {
 		await daemon.removeAgentRuntime(agent);
 	}
-	const removed = store.deleteAgent(agent.agentId, { force: true });
+	const removed = store.services.agents.deleteAgent(agent.agentId, { force: true });
 	console.log(chalk.green(`Removed agent ${removed.slug}`));
 }

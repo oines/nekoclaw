@@ -99,16 +99,16 @@ function createMessageTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "message",
 		label: "Message",
-		description: "Advanced current-session channel actions ONLY: current-session send/reply/edit/delete/typing.",
+		description: "Advanced actions in the current session only: explicit send, reply, edit, delete, or typing.",
 		promptSnippet:
-			"message(action, text?, attachments?, replyToId?, messageId?): Use ONLY for current-session reply/edit/delete/typing or an explicit current-session send. Use send_message(target, ...) for cross-target outreach.",
+			"message(action, text?, attachments?, replyToId?, messageId?): use only for explicit actions in this current session.",
 		promptGuidelines: [
-			"For normal conversational replies, JUST OUTPUT PLAIN TEXT directly. DO NOT invoke this tool.",
-			"Use message(action='send'|'reply') ONLY for the current session. Never use it to message some other contact or group.",
-			"Use message(action='reply') ONLY when you must explicitly reply to a specific previous message ID.",
-			"Use message(action='typing') to show typing while you prepare a longer answer.",
-			"Use message(action='edit'|'delete') with a concrete message id.",
-			"Use send_message(target, ...) when you need to proactively message another known contact or group.",
+			"Do not use this for a normal current reply. Just output plain text when plain text is enough.",
+			"Use this only inside the current session. Never use it to reach another contact or group.",
+			"Use action='reply' only when you must explicitly reply to a specific previous message id.",
+			"Use action='edit' or action='delete' only with a concrete message id.",
+			"Use action='typing' when showing typing is useful before a longer answer.",
+			"Examples: current normal reply -> plain text; explicit current-session reply -> message(action='reply', ...); proactive outreach elsewhere -> send_message(target, ...).",
 		],
 		parameters: MessageToolParameters,
 		execute: async (_toolCallId, params) => {
@@ -194,12 +194,12 @@ function createListContactsTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "list_contacts",
 		label: "List Contacts",
-		description: "Look through the contacts you already know, like checking your own address book before reaching out to someone.",
+		description: "List the runtime-known contacts you can proactively message.",
 		promptSnippet:
-			"list_contacts(channel?): check who you already know on telegram or qq before choosing someone to contact.",
+			"list_contacts(channel?): list known telegram or qq contacts before choosing a proactive message target.",
 		promptGuidelines: [
-			"Use this when you want to proactively contact someone but need to see which known contacts are currently available to you.",
-			"Treat the result like your own address book: it shows people the runtime already knows about, not the platform's full friend list.",
+			"Use this before proactive outreach when you do not yet know the exact contact ref.",
+			"The result is the runtime-known contact list, not a platform-wide friend list.",
 			"Use get_contact_detail(account) after this if you want a closer look at one person before messaging them.",
 		],
 		parameters: ListContactsParameters,
@@ -218,12 +218,12 @@ function createListGroupsTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "list_groups",
 		label: "List Groups",
-		description: "Look through the groups you already know about, like checking which rooms or group chats you have been in.",
+		description: "List the runtime-known groups you can inspect or proactively message.",
 		promptSnippet:
-			"list_groups(channel?): check which known telegram or qq groups are currently available to you before messaging a group or inspecting its members.",
+			"list_groups(channel?): list known telegram or qq groups before messaging a group or inspecting its members.",
 		promptGuidelines: [
-			"Use this when you want to proactively talk in another group and need its explicit group ref first.",
-			"Treat the result like a list of group chats the runtime already knows, not a platform-wide directory of every group.",
+			"Use this before proactive group outreach when you need the explicit group ref first.",
+			"The result is the runtime-known group list, not a platform-wide directory of every group.",
 			"If a group's title is null, treat the group name as unknown. Do not guess or rename it.",
 			"Use get_group_members(groupRef) after this if you need to see which known people are associated with one specific group.",
 		],
@@ -243,12 +243,12 @@ function createGetGroupMembersTool(context: ChannelToolContext): ToolDefinition 
 	return {
 		name: "get_group_members",
 		label: "Group Members",
-		description: "Inspect which people you currently know in one specific group, like checking who is in the room before speaking there.",
+		description: "Inspect the runtime-known members for one explicit group ref.",
 		promptSnippet:
-			"get_group_members(groupRef): inspect the known members of one explicit group ref.",
+			"get_group_members(groupRef): inspect the runtime-known members of one explicit group ref.",
 		promptGuidelines: [
 			"Use this after list_groups when you want to understand who you know in a particular group.",
-			"Treat the result as your runtime-known view of that group, not a guaranteed full member roster from the platform.",
+			"Treat the result as runtime-known membership, not a guaranteed full platform roster.",
 			"If the group's title is null, treat its name as unknown instead of inventing one.",
 			"Use the returned member refs if you later want to inspect someone with get_contact_detail(account).",
 		],
@@ -276,12 +276,12 @@ function createGetContactDetailTool(context: ChannelToolContext): ToolDefinition
 	return {
 		name: "get_contact_detail",
 		label: "Contact Detail",
-		description: "Inspect one known person's contact card and recent runtime metadata before you decide how to address them.",
+		description: "Inspect one explicit runtime-known contact before referring to or messaging them.",
 		promptSnippet:
-			"get_contact_detail(account): inspect one explicit contact ref to understand who that person is in your current runtime-known world.",
+			"get_contact_detail(account): inspect one explicit runtime-known contact ref.",
 		promptGuidelines: [
 			"Use this when you already have a contact ref and want a closer look before messaging or referring to that person.",
-			"Treat the result like a contact card built from runtime knowledge, not a guaranteed complete identity record.",
+			"Treat the result as runtime metadata, not a guaranteed complete identity record.",
 			"Use list_contacts first if you do not yet know which contact ref to inspect.",
 		],
 		parameters: GetContactDetailParameters,
@@ -307,14 +307,15 @@ function createSendMessageTool(context: ChannelToolContext): ToolDefinition {
 	return {
 		name: "send_message",
 		label: "Send Message",
-		description: "Proactively start speaking in another known chat, like opening a different conversation window and sending a message there.",
+		description: "Proactively send a message to another known DM or group outside the current session.",
 		promptSnippet:
-			"send_message(target, text?, attachments?): proactively message another known contact or group outside the current session.",
+			"send_message(target, text?, attachments?): proactively message another known target outside the current session.",
 		promptGuidelines: [
-			"Use this only when you want to contact a different person or group than the one you are currently talking to.",
-			"Use explicit target refs like telegram:dm:123 or qq:group:456.",
+			"Use this only when the target is different from the one you are currently talking to.",
+			"Use an explicit target ref like telegram:dm:123 or qq:group:456.",
 			"Use list_contacts or list_groups first if you are not sure which target ref to use.",
 			"For the current session, either respond in plain text or use message(...) for advanced current-session actions instead.",
+			"Examples: proactive note to another DM -> send_message(target, ...); replying here in the current session -> plain text or message(...), not send_message.",
 		],
 		parameters: SendMessageParameters,
 		execute: async (_toolCallId, params) => {
@@ -359,8 +360,7 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 			"session_status(): check your current conversation context and available messaging abilities before choosing how to act.",
 		promptGuidelines: [
 			"Use this when you need to ground yourself in the current chat before taking an action.",
-			"It helps you confirm whether you are in a DM or group, which channel you are on, and what message actions are supported here.",
-			"It helps you confirm whether you are in a DM or group, which channel you are on, and what message actions are supported here.",
+			"It confirms whether you are in a DM or group, which channel you are on, and which message actions are supported here.",
 		],
 		parameters: SessionStatusParameters,
 			execute: async () => {
@@ -392,11 +392,11 @@ function createCronTool(context: ChannelToolContext): ToolDefinition {
 		promptSnippet:
 			"cron(action, ...): create/list/cancel reminders for THIS session only. The session is auto-bound; never provide a session key.",
 		promptGuidelines: [
-			"Use this when the user asks to be reminded later in this same DM or group.",
+			"Use this when the user asks for a reminder later in this same DM or group.",
 			"Default timezone is the server local timezone shown by session_status.",
 			"Use action='create' with scheduleKind='once' plus runAtLocal for a one-time reminder, or scheduleKind='daily' plus hour/minute for a daily reminder.",
-			"Use action='list' to inspect active reminders in the current session before canceling one.",
-			"Use action='cancel' with a cronId returned by list. Cancellation is scoped to the current session.",
+			"Use action='list' before canceling if you need to inspect active reminders in the current session.",
+			"Use action='cancel' with a cronId returned by list. Cancellation stays scoped to the current session.",
 		],
 		parameters: CronToolParameters,
 		execute: async (_toolCallId, params) => {
@@ -483,9 +483,9 @@ function createNoReplyTool(context: ChannelToolContext): ToolDefinition {
 		promptSnippet:
 			"no_reply(): intentionally send nothing back for this inbound message when silence is the correct behavior.",
 		promptGuidelines: [
-			"Use in group chats when the message is not addressed to you and silence is the right response.",
-			"Do not use in DMs — staying silent in a direct message is almost always wrong.",
-			"If you want to stay silent AND send something elsewhere, call no_reply first, then use send_message.",
+			"Use this in group chats when silence is intentionally the right response.",
+			"Do not use this in DMs. Staying silent in a direct message is almost always wrong.",
+			"If you want to stay silent here and speak elsewhere, call no_reply first, then use send_message.",
 		],
 		parameters: NoReplyParameters,
 		execute: async () => {

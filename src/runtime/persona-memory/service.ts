@@ -61,7 +61,7 @@ export class PersonaMemoryService {
 		agent: AgentSpec;
 		session: SessionRecord;
 		event: InboundMessageEvent;
-		replyText: string;
+		turnTranscript: string;
 		personaContext: PreparedPersonaContext;
 		effectiveModel?: WorkerPayload["effectiveModel"];
 	}): void {
@@ -221,7 +221,7 @@ export class PersonaMemoryService {
 		agent: AgentSpec;
 		session: SessionRecord;
 		event: InboundMessageEvent;
-		replyText: string;
+		turnTranscript: string;
 		personaContext: PreparedPersonaContext;
 		effectiveModel?: WorkerPayload["effectiveModel"];
 	}): Promise<void> {
@@ -249,7 +249,7 @@ export class PersonaMemoryService {
 					allowDeletes: false,
 					prompt: buildFormationTurnPrompt({
 						sceneRef,
-						replyText: input.replyText,
+						turnTranscript: input.turnTranscript,
 						sceneMemoryPath: buildSceneMemoryPath(sceneRef),
 						memoryManifestText: snapshot.memoryManifestText,
 					}),
