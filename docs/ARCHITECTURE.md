@@ -188,15 +188,15 @@ no_reply          明确抑制默认回复
 
 ```
 {workspace}/
-├── SOUL.md                          # 人格、声音、行为约束
-├── MEMORY.md                        # 持久事实（手动维护或 agent 写入）
+├── SOUL.md                          # 人格、声音、行为约束（纯 Markdown）
+├── MEMORY.md                        # 持久事实（纯 Markdown）
 └── .nekoclaw-persona/
-    ├── index.md                     # 所有人物和场景的全局快照（≤2,000 tokens）
+    ├── index.md                     # 所有人物和场景的全局快照（纯 Markdown，≤2,000 tokens）
     ├── memory/
     │   ├── people/
-    │   │   └── {person-name}.md     # 每人一个记忆文件
+    │   │   └── {person-name}.md     # 每人一个记忆文件（YAML frontmatter + Markdown 正文）
     │   └── scenes/
-    │       └── {scene-ref}.md       # 每个场景（群组/频道）一个记忆文件
+    │       └── {scene-ref}.md       # 每个场景记忆文件（YAML frontmatter + Markdown 正文）
     ├── observations/
     │   └── {scene-ref}.log          # 只追加的原始事件日志
     └── control/
@@ -204,6 +204,18 @@ no_reply          明确抑制默认回复
         └── formation-retries/
             └── {scene-ref}.json     # 每个场景的重试状态
 ```
+
+**记忆文件格式要求：**
+- `memory/people/*.md` 和 `memory/scenes/*.md` 必须包含 YAML frontmatter，格式：
+  ```markdown
+  ---
+  title: 文件标题
+  description: 简短描述，用于快速判断内容
+  ---
+
+  自然语言正文...
+  ```
+- `index.md`、`SOUL.md`、`MEMORY.md` 为纯 Markdown，无 frontmatter
 
 ### 记忆层级（按优先级注入提示词）
 

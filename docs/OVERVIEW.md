@@ -48,11 +48,23 @@
 每次对话开始时都会看一眼，控制在 2,000 token 以内。这是它的"通讯录"，告诉它有哪些详细记忆可以调取。
 
 **第四层：详细记忆（.nekoclaw-persona/memory/）**
-每个人和每个场景各有一个独立的 Markdown 文件：
+每个人和每个场景各有一个独立的 Markdown 文件，格式为 YAML frontmatter + 自然语言正文：
+```markdown
+---
+title: Alice
+description: 老朋友，摄影爱好者，在 Telegram 主群认识
+---
+
+Alice 是我在 Telegram 主群认识的朋友，她对摄影很有热情...
+（后续是自然语言的详细记录）
+```
+
 - `memory/people/alice.md` — 关于 Alice 的详细记录：性格、关系、共同经历、情感细节
 - `memory/scenes/telegram-group-123.md` — 关于这个群的详细记录：氛围、常驻成员、话题倾向
 
 这层**不会自动加载**。它在对话中看到索引后，自己判断是否需要读某个文件——比如用户提到了 Alice，它才会去读 `alice.md`。这样既保持了提示词轻量，又能在需要时获取完整背景。
+
+frontmatter 中的 `description` 会被 Formation 和 Dream 用来快速判断文件内容，`title` 用于在索引中显示。
 
 **第五层：观察日志（.nekoclaw-persona/observations/）**
 每个场景对应一个 `.log` 文件，记录它在这个群里看到的所有消息，格式如下：
