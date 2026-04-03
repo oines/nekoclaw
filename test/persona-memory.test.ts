@@ -447,18 +447,19 @@ describe("persona memory service", () => {
 		}
 		const context = await personaMemory.buildPreparedContext(agent, session, event);
 		let formationPrompt = "";
-		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
-			formationPrompt = (input as { prompt?: string }).prompt ?? "";
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			const maintenanceInput = input as { tempPersonaDir: string; prompt?: string };
+			formationPrompt = maintenanceInput.prompt ?? "";
 			writeFileSync(
-				join(input.tempPersonaDir, "index.md"),
+				join(maintenanceInput.tempPersonaDir, "index.md"),
 				"## 我认识的人和场景\n- 张三：GPU 租赁平台 → memory/people/telegram-111.md\n- telegram-dm-111：近期互动 → memory/scenes/telegram-dm-111.md\n",
 			);
 			writeFileSync(
-				join(input.tempPersonaDir, "memory/people/telegram-111.md"),
+				join(maintenanceInput.tempPersonaDir, "memory/people/telegram-111.md"),
 				"# 张三\n\n张三在做一个 GPU 租赁平台。",
 			);
 			writeFileSync(
-				join(input.tempPersonaDir, "memory/scenes/telegram-dm-111.md"),
+				join(maintenanceInput.tempPersonaDir, "memory/scenes/telegram-dm-111.md"),
 				"这个场景里张三一直在聊 GPU 租赁平台。",
 			);
 			return {
@@ -515,13 +516,14 @@ describe("persona memory service", () => {
 			}),
 		);
 		vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-01T00:40:00.000Z").getTime());
-		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			const maintenanceInput = input as { tempPersonaDir: string; prompt?: string };
 			writeFileSync(
-				join(input.tempPersonaDir, "index.md"),
+				join(maintenanceInput.tempPersonaDir, "index.md"),
 				"## 我在的群\n- telegram-group-1001：近期聊招人 → memory/scenes/telegram-group-1001.md\n",
 			);
 			writeFileSync(
-				join(input.tempPersonaDir, "memory/scenes/telegram-group-1001.md"),
+				join(maintenanceInput.tempPersonaDir, "memory/scenes/telegram-group-1001.md"),
 				"这个群最近有人提到项目开始招人。\n",
 			);
 			return {
@@ -725,14 +727,15 @@ describe("persona memory service", () => {
 			}),
 		);
 		let dreamPrompt = "";
-		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
-			dreamPrompt = (input as { prompt?: string }).prompt ?? "";
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			const maintenanceInput = input as { tempPersonaDir: string; prompt?: string };
+			dreamPrompt = maintenanceInput.prompt ?? "";
 			writeFileSync(
-				join(input.tempPersonaDir, "index.md"),
+				join(maintenanceInput.tempPersonaDir, "index.md"),
 				"## 我认识的人\n- 已知人物：更新后 → memory/people/known.md\n",
 			);
 			writeFileSync(
-				join(input.tempPersonaDir, "memory/people/known.md"),
+				join(maintenanceInput.tempPersonaDir, "memory/people/known.md"),
 				"更新后的 Dream 记忆。",
 			);
 			return {
@@ -785,9 +788,10 @@ describe("persona memory service", () => {
 				occurredAt: "2026-04-01T00:00:00.000Z",
 			}),
 		);
-		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
-			writeFileSync(join(input.tempPersonaDir, "index.md"), "## 我认识的人\n");
-			rmSync(join(input.tempPersonaDir, "memory/people/obsolete.md"));
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			const maintenanceInput = input as { tempPersonaDir: string; prompt?: string };
+			writeFileSync(join(maintenanceInput.tempPersonaDir, "index.md"), "## 我认识的人\n");
+			rmSync(join(maintenanceInput.tempPersonaDir, "memory/people/obsolete.md"));
 			return {
 				finalize: { consumeObservationLines: 0, summary: "forgot one obsolete person" },
 				touchedPaths: ["index.md"],
@@ -917,7 +921,8 @@ describe("persona memory service", () => {
 		const context = await personaMemory.buildPreparedContext(agent, session, event);
 		let capturedPrompt = "";
 		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
-			capturedPrompt = (input as { prompt?: string }).prompt ?? "";
+			const maintenanceInput = input as { tempPersonaDir: string; prompt?: string };
+			capturedPrompt = maintenanceInput.prompt ?? "";
 			return { finalize: { consumeObservationLines: 50, summary: "ok" }, touchedPaths: [], deletedPaths: [] };
 		});
 

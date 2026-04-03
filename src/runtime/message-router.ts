@@ -53,7 +53,6 @@ export class MessageRouterService {
 						attachmentsRelativeDir: `chats/${session.sessionRecordId}/attachments`,
 					})
 				: event;
-		this.personaMemory.recordInbound(agent.agentId, session, hydratedEvent);
 		const canProcessNormally = plugin?.triggering.shouldProcessEvent(hydratedEvent) ?? true;
 		if (session) {
 			if (hydratedEvent.chatKind === "group" && hydratedEvent.chatTitle?.trim()) {
@@ -92,6 +91,7 @@ export class MessageRouterService {
 			await this.handleUnpairedMessage(agent.agentId, channel.type, hydratedEvent, sessionAddress);
 			return;
 		}
+		this.personaMemory.recordInbound(agent.agentId, session, hydratedEvent);
 		try {
 			await this.enqueue({
 				jobId: crypto.randomUUID(),

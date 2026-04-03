@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -270,6 +270,15 @@ describe("message router", () => {
 		});
 
 		expect(enqueue).not.toHaveBeenCalled();
+		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "quiet-group-cat", ".nekoclaw-persona", "observations");
+		const files = (() => {
+			try {
+				return readdirSync(obsDir);
+			} catch {
+				return [];
+			}
+		})();
+		expect(files).toHaveLength(0);
 	});
 
 	it("ignores group slash commands before command routing when mention triggering does not match", async () => {
@@ -348,5 +357,187 @@ describe("message router", () => {
 
 		expect(reply).not.toHaveBeenCalled();
 		expect(enqueue).not.toHaveBeenCalled();
+		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "quiet-command-cat", ".nekoclaw-persona", "observations");
+		const files = (() => {
+			try {
+				return readdirSync(obsDir);
+			} catch {
+				return [];
+			}
+		})();
+		expect(files).toHaveLength(0);
+	});
+
+	it("does not write an observation for an unpaired message", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { MessageRouterService } = await import("../src/runtime/message-router.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "unpaired-obs-cat" });
+		store.createChannel(agent.agentId, "telegram");
+		store.setChannelToken(agent.agentId, "telegram", "token");
+		// No session created — message is unpaired
+
+		const enqueue = vi.fn(async () => undefined);
+		const plugin: ChannelPlugin = {
+			type: "telegram",
+			capabilities: { text: true, media: true, reply: true, edit: true, delete: true, typing: true },
+			outbound: { send: async () => [] },
+			actions: {
+				send: async () => [],
+				reply: async () => [],
+				edit: async () => undefined,
+				delete: async () => undefined,
+				typing: async () => undefined,
+			},
+			threading: { resolveReplyMode: () => "off", applyReplyMode: (p) => p },
+			pairing: {
+				shouldOfferPair: () => false,
+				buildPairPrompt: () => ({}),
+				buildPairAccepted: () => ({}),
+				buildPairRejected: () => ({}),
+			},
+			triggering: { shouldProcessEvent: () => true },
+			resolveSessionAddress: () => ({ channelType: "telegram", externalConversationId: "9001", chatKind: "dm" }),
+			startPolling: () => undefined,
+			stop: () => undefined,
+		};
+		const plugins = new Map<string, ChannelPlugin>();
+		plugins.set(getRuntimeKey(agent.agentId, "telegram"), plugin);
+		const commands = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+		const router = new MessageRouterService(store, plugins, commands, enqueue);
+
+		await router.handleInbound(agent.agentId, "telegram", {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId: "9001",
+			chatKind: "dm",
+			messageId: "20",
+			sender: { externalId: "42" },
+			blocks: [{ kind: "text", text: "hello from unpaired" }],
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "unpaired-obs-cat", ".nekoclaw-persona", "observations");
+		const files = (() => { try { return readdirSync(obsDir); } catch { return []; } })();
+		expect(files).toHaveLength(0);
+	});
+
+	it("does not write an observation for a command message", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { MessageRouterService } = await import("../src/runtime/message-router.js");
+
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "command-obs-cat" });
+		const agent = store.setBuiltinModelConfig("command-obs-cat", { provider: "openai", modelId: "gpt-5" });
+		store.createChannel(agent.agentId, "telegram");
+		store.setChannelToken(agent.agentId, "telegram", "token");
+		store.createSession(agent.agentId, { channelType: "telegram", externalConversationId: "9002", chatKind: "dm" });
+
+		const reply = vi.fn(async () => []);
+		const enqueue = vi.fn(async () => undefined);
+		const plugin: ChannelPlugin = {
+			type: "telegram",
+			capabilities: { text: true, media: true, reply: true, edit: true, delete: true, typing: true },
+			outbound: { send: async () => [] },
+			actions: {
+				send: async () => [],
+				reply,
+				edit: async () => undefined,
+				delete: async () => undefined,
+				typing: async () => undefined,
+			},
+			threading: { resolveReplyMode: () => "off", applyReplyMode: (p) => p },
+			pairing: {
+				shouldOfferPair: () => false,
+				buildPairPrompt: () => ({}),
+				buildPairAccepted: () => ({}),
+				buildPairRejected: () => ({}),
+			},
+			triggering: { shouldProcessEvent: () => true },
+			resolveSessionAddress: () => ({ channelType: "telegram", externalConversationId: "9002", chatKind: "dm" }),
+			startPolling: () => undefined,
+			stop: () => undefined,
+		};
+		const plugins = new Map<string, ChannelPlugin>();
+		plugins.set(getRuntimeKey(agent.agentId, "telegram"), plugin);
+		const commands = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+		const router = new MessageRouterService(store, plugins, commands, enqueue);
+
+		await router.handleInbound(agent.agentId, "telegram", {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId: "9002",
+			chatKind: "dm",
+			messageId: "21",
+			sender: { externalId: "42" },
+			blocks: [{ kind: "text", text: "/status@bot" }],
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		expect(reply).toHaveBeenCalledTimes(1);
+		expect(enqueue).not.toHaveBeenCalled();
+		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "command-obs-cat", ".nekoclaw-persona", "observations");
+		const files = (() => { try { return readdirSync(obsDir); } catch { return []; } })();
+		expect(files).toHaveLength(0);
+	});
+
+	it("writes an observation for a normal paired message", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { MessageRouterService } = await import("../src/runtime/message-router.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "normal-obs-cat" });
+		store.createChannel(agent.agentId, "telegram");
+		store.setChannelToken(agent.agentId, "telegram", "token");
+		store.createSession(agent.agentId, { channelType: "telegram", externalConversationId: "9003", chatKind: "dm" });
+
+		const enqueue = vi.fn(async () => undefined);
+		const plugin: ChannelPlugin = {
+			type: "telegram",
+			capabilities: { text: true, media: true, reply: true, edit: true, delete: true, typing: true },
+			outbound: { send: async () => [] },
+			actions: {
+				send: async () => [],
+				reply: async () => [],
+				edit: async () => undefined,
+				delete: async () => undefined,
+				typing: async () => undefined,
+			},
+			threading: { resolveReplyMode: () => "off", applyReplyMode: (p) => p },
+			pairing: {
+				shouldOfferPair: () => false,
+				buildPairPrompt: () => ({}),
+				buildPairAccepted: () => ({}),
+				buildPairRejected: () => ({}),
+			},
+			triggering: { shouldProcessEvent: () => true },
+			resolveSessionAddress: () => ({ channelType: "telegram", externalConversationId: "9003", chatKind: "dm" }),
+			startPolling: () => undefined,
+			stop: () => undefined,
+		};
+		const plugins = new Map<string, ChannelPlugin>();
+		plugins.set(getRuntimeKey(agent.agentId, "telegram"), plugin);
+		const commands = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+		const router = new MessageRouterService(store, plugins, commands, enqueue);
+
+		await router.handleInbound(agent.agentId, "telegram", {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId: "9003",
+			chatKind: "dm",
+			messageId: "22",
+			sender: { externalId: "42" },
+			blocks: [{ kind: "text", text: "a normal paired message" }],
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		expect(enqueue).toHaveBeenCalledTimes(1);
+		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "normal-obs-cat", ".nekoclaw-persona", "observations");
+		const files = readdirSync(obsDir).filter((f) => f.endsWith(".log"));
+		expect(files.length).toBeGreaterThan(0);
 	});
 });

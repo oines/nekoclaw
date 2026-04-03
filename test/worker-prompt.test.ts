@@ -193,7 +193,7 @@ describe("worker append prompt", () => {
 			},
 		};
 
-		const images = collectPromptImages(payload, workspaceDir);
+		const images = collectPromptImages(payload, workspaceDir, []);
 
 		expect(images).toEqual([
 			{
