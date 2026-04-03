@@ -127,6 +127,7 @@ export async function ensureAgentContainer(agent: AgentSpec, workspaceHostPath: 
 	}
 
 	const runtimeMountRoot = getRuntimeMountRoot();
+	const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 	const result = await runCommand("docker", [
 		"run",
 		"-d",
@@ -134,6 +135,8 @@ export async function ensureAgentContainer(agent: AgentSpec, workspaceHostPath: 
 		agent.containerName,
 		"--workdir",
 		NEKOCLAW_CONTAINER_WORKSPACE_DIR,
+		"-e",
+		`TZ=${timezone}`,
 		"-v",
 		`${workspaceHostPath}:${NEKOCLAW_CONTAINER_WORKSPACE_DIR}`,
 		"-v",
