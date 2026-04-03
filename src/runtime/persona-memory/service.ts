@@ -249,7 +249,6 @@ export class PersonaMemoryService {
 					allowDeletes: false,
 					prompt: buildFormationTurnPrompt({
 						sceneRef,
-						event: input.event,
 						replyText: input.replyText,
 						sceneMemoryPath: buildSceneMemoryPath(sceneRef),
 						memoryManifestText: snapshot.memoryManifestText,

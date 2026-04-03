@@ -3,13 +3,6 @@ import { Type, type Static } from "@sinclair/typebox";
 import { codingTools, type ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { parseTargetRef } from "../runtime/runtime-directory.js";
 import { normalizeTimezone, validateDailyTimePart, validateRunAtLocal } from "../store/cron-schedule.js";
-import {
-	SESSION_COMPACTION_SETTINGS,
-	SESSION_PRUNING_ENABLED,
-	SESSION_PRUNING_OVERSIZED_RESULT_CHARS,
-	SESSION_PRUNING_PROTECTED_ASSISTANT_MESSAGES,
-	SESSION_PRUNING_TOOL_RESULT_BUDGET_CHARS,
-} from "../runtime/session-hygiene.js";
 import type { ChannelToolContext, OutboundAttachment } from "../types.js";
 
 const AttachmentSchema = Type.Object({
@@ -27,7 +20,7 @@ const MessageToolParameters = Type.Object({
 		Type.Literal("edit"),
 		Type.Literal("delete"),
 		Type.Literal("typing"),
-	]),
+	], { description: "Channel action: send (new message in current session), reply (explicit thread reply), edit (update existing message), delete (remove message), typing (show typing indicator)." }),
 	text: Type.Optional(Type.String()),
 	replyToId: Type.Optional(Type.String({ description: "Explicit message id to reply to." })),
 	messageId: Type.Optional(Type.String({ description: "Existing message id for edit/delete actions." })),
@@ -59,8 +52,8 @@ const CronToolParameters = Type.Object({
 	scheduleKind: Type.Optional(Type.Union([Type.Literal("once"), Type.Literal("daily")])),
 	message: Type.Optional(Type.String()),
 	runAtLocal: Type.Optional(Type.String({ description: "One-time local wall-clock timestamp like 2026-04-03T07:00." })),
-	hour: Type.Optional(Type.Number()),
-	minute: Type.Optional(Type.Number()),
+	hour: Type.Optional(Type.Number({ description: "Hour (0-23) for daily reminders." })),
+	minute: Type.Optional(Type.Number({ description: "Minute (0-59) for daily reminders." })),
 	timezone: Type.Optional(Type.String({ description: "IANA timezone like Asia/Shanghai. Defaults to the server local timezone." })),
 });
 
@@ -367,7 +360,7 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 		promptGuidelines: [
 			"Use this when you need to ground yourself in the current chat before taking an action.",
 			"It helps you confirm whether you are in a DM or group, which channel you are on, and what message actions are supported here.",
-			"It also shows current compaction and pruning settings so you know the shape of the session context you are working inside.",
+			"It helps you confirm whether you are in a DM or group, which channel you are on, and what message actions are supported here.",
 		],
 		parameters: SessionStatusParameters,
 			execute: async () => {
@@ -382,17 +375,6 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 					availableChannels: context.runtimeDirectory.availableChannels,
 					timezone: context.serverTimezone,
 					activeCronCount: context.sessionCrons.length,
-					compaction: {
-						enabled: Boolean(SESSION_COMPACTION_SETTINGS.enabled),
-						reserveTokens: SESSION_COMPACTION_SETTINGS.reserveTokens,
-						keepRecentTokens: SESSION_COMPACTION_SETTINGS.keepRecentTokens,
-					},
-					pruning: {
-						enabled: SESSION_PRUNING_ENABLED,
-						protectedRecentAssistantMessages: SESSION_PRUNING_PROTECTED_ASSISTANT_MESSAGES,
-						oversizedThresholdChars: SESSION_PRUNING_OVERSIZED_RESULT_CHARS,
-						toolResultBudgetChars: SESSION_PRUNING_TOOL_RESULT_BUDGET_CHARS,
-					},
 				};
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
@@ -500,6 +482,11 @@ function createNoReplyTool(context: ChannelToolContext): ToolDefinition {
 		description: "Explicitly suppress the default assistant reply for the current inbound message.",
 		promptSnippet:
 			"no_reply(): intentionally send nothing back for this inbound message when silence is the correct behavior.",
+		promptGuidelines: [
+			"Use in group chats when the message is not addressed to you and silence is the right response.",
+			"Do not use in DMs — staying silent in a direct message is almost always wrong.",
+			"If you want to stay silent AND send something elsewhere, call no_reply first, then use send_message.",
+		],
 		parameters: NoReplyParameters,
 		execute: async () => {
 			context.recordAction({ kind: "no_reply" });

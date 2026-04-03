@@ -74,8 +74,12 @@ export function normalizeText(value: string | undefined): string {
 	return value?.trim() || "";
 }
 
+function toExposedChannelType(channelType: string): string {
+	return channelType === "napcat" ? "qq" : channelType;
+}
+
 export function formatObservationLine(event: InboundMessageEvent): string {
-	const speaker = `${event.channelType}:${event.sender.externalId ?? event.chatId}`;
+	const speaker = `${toExposedChannelType(event.channelType)}:${event.sender.externalId ?? event.chatId}`;
 	const displayName = event.sender.displayName ? ` ${event.sender.displayName}` : "";
 	const content = collectEventText(event).replace(/\n+/g, " ").trim();
 	return `[${event.occurredAt}] ${speaker}${displayName}: ${content}`;

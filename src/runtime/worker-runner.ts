@@ -9,13 +9,20 @@ import { PersonaMemoryService } from "./persona-memory.js";
 import { RuntimeDirectoryService } from "./runtime-directory.js";
 import { getRuntimeKey } from "./runtime-key.js";
 
-function collectToolActionReplyText(result: WorkerResult): string {
+export function collectToolActionReplyText(result: WorkerResult): string {
 	return (result.toolActions ?? [])
 		.filter((action): action is Extract<NonNullable<WorkerResult["toolActions"]>[number], { kind: "send" | "reply" }> =>
 			action.kind === "send" || action.kind === "reply",
 		)
-		.map((action) => action.payload.text?.trim())
-		.filter((text): text is string => Boolean(text))
+		.map((action) => {
+			const parts: string[] = [];
+			if (action.payload.text?.trim()) parts.push(action.payload.text.trim());
+			for (const att of action.payload.attachments ?? []) {
+				parts.push(`[${att.kind === "image" ? "image" : "file"}: ${att.name ?? att.mimeType ?? "attachment"}]`);
+			}
+			return parts.join("\n");
+		})
+		.filter(Boolean)
 		.join("\n\n");
 }
 

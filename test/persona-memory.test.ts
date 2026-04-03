@@ -841,4 +841,92 @@ describe("persona memory service", () => {
 		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toContain("dream 失败时 observation 不该被消费");
 		expect(store.getAuditEntries(agent.agentId).some((entry) => entry.kind === "persona.dream_failed")).toBe(true);
 	});
+
+	it("writes qq instead of napcat in observation lines for napcat channel events", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "napcat-obs-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "88888",
+			chatKind: "group",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "napcat",
+				chatId: "88888",
+				chatKind: "group",
+				messageId: "1",
+				senderId: "12345",
+				senderName: "小明",
+				text: "hello from qq",
+				occurredAt: "2026-04-03T00:00:00.000Z",
+			}),
+		);
+
+		const observationPath = store.getPersonaObservationPath(agent.slug, "napcat-group-88888");
+		const content = readFileSync(observationPath, "utf-8");
+		expect(content).toContain("qq:12345");
+		expect(content).not.toContain("napcat:");
+	});
+
+	it("formation prompt omits embedded inbound message and includes observation format hint", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "formation-prompt-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "999",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+
+		let event = createEvent({
+			channelType: "telegram",
+			chatId: "999",
+			chatKind: "dm",
+			messageId: "m1",
+			senderId: "999",
+			senderName: "用户",
+			text: "UNIQUE_INBOUND_TEXT_XYZ",
+			occurredAt: "2026-04-01T00:00:00.000Z",
+		});
+		personaMemory.recordInbound(agent.agentId, session, event);
+		for (let index = 2; index <= 50; index += 1) {
+			event = createEvent({
+				channelType: "telegram",
+				chatId: "999",
+				chatKind: "dm",
+				messageId: `m${index}`,
+				senderId: "999",
+				senderName: "用户",
+				text: `msg ${index}`,
+				occurredAt: `2026-04-01T00:${String(index - 1).padStart(2, "0")}:00.000Z`,
+			});
+			personaMemory.recordInbound(agent.agentId, session, event);
+		}
+		const context = await personaMemory.buildPreparedContext(agent, session, event);
+		let capturedPrompt = "";
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			capturedPrompt = (input as { prompt?: string }).prompt ?? "";
+			return { finalize: { consumeObservationLines: 50, summary: "ok" }, touchedPaths: [], deletedPaths: [] };
+		});
+
+		personaMemory.scheduleFormation({ agent, session, event, replyText: "bot reply here", personaContext: context });
+		await waitForBackgroundWork();
+
+		expect(capturedPrompt).not.toContain("Current inbound message");
+		expect(capturedPrompt).not.toContain("UNIQUE_INBOUND_TEXT_XYZ");
+		expect(capturedPrompt).toContain("Observation line format:");
+		expect(capturedPrompt).toContain("bot reply here");
+	});
 	});

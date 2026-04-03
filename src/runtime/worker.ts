@@ -103,24 +103,23 @@ ${payload.personaContext.sceneObservations}`
 - \`skills/\` contains reusable skills for this agent.
 - \`chats/<sessionRecordId>/\` is only for this session's logs, context, attachments, and scratch files.
 
-🟢 IMPORTANT FOR RESPONDING:
+## Responding
 - To reply normally to the user, JUST OUTPUT RAW TEXT directly.
 - DO NOT use the \`message\` tool for regular responses.
 - ONLY use the \`message\` tool for advanced actions in the current session: explicit current-session send/reply/edit/delete/typing.
 - Use the \`send_message\` tool when you need to proactively message another known contact or group outside the current session.
 - Use the \`session_status\` tool to inspect current session capabilities before choosing a messaging action.
-- The server local timezone for reminder scheduling is ${payload.serverTimezone}.
 - Use \`list_contacts\`, \`list_groups\`, \`get_group_members\`, and \`get_contact_detail\` to inspect the runtime-known directory snapshot.
 - Use the \`cron\` tool to create, inspect, or cancel reminders bound to the current session. Never invent or ask for a session key.
 - Use the \`no_reply\` tool when the best action is to intentionally stay silent.
 - If Persona memory context is present, treat it as the authoritative memory substrate for people and past events.
 - The persona index is always-on high-level context. If you need detailed memory about a person or scene, use the built-in \`read\` tool to open the specific file path referenced in index.md under \`.nekoclaw-persona/memory/\`.
 - Do not read persona memory files by default. Read them only when the current dialogue genuinely needs detailed background that is not already clear from index.md and the current conversation.
-- Current Scene Observations are recent旁观记录. If you refer to them, make it explicit when you were only observing rather than participating.
+- Current Scene Observations are recent passive observations (旁观记录). If you refer to them, make it explicit when you were only observing rather than participating.
 - Current Scene Observations are already injected for you, so you do not need to manually read observations/ files.
 - Preserve uncertainty markers from the evidence ("可能", "应该", etc.) instead of upgrading them into certainty.
 ${hasCurrentImages
-	? `- The current inbound message includes image content. If the user asks what is in the image, answer with direct visual facts first.
+	? `- The current inbound message includes image content. Answer with direct visual facts first.
 - Do NOT use placeholder templates, bracketed fill-ins, canned admiration, or speculative scene descriptions.
 - Do NOT write phrases like "[此处根据图片内容描述]" / "例如" / "比如" as stand-ins.
 - If something is unclear, say exactly which detail is unclear instead of guessing.`
@@ -162,7 +161,7 @@ function buildPrompt(payload: WorkerPayload, hasImages: boolean, hasFiles: boole
 	];
 	if (hasImages) {
 		lines.push(
-			"\n[VISUAL DATA ATTACHED: Use your vision capabilities to analyze the provided image(s) above. Describe only what is visually supported. No placeholder templates, no bracketed examples, no generic praise, and no invented details.]",
+			"\n[Image data attached. Analyze directly using vision — do not try to read image files with coding tools.]",
 		);
 	}
 	if (hasFiles) {
@@ -322,7 +321,7 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	}
 	if (images.length > 0) {
 		finalUserPrompt +=
-			"\n\n[SYSTEM HINT: I've loaded image pixel data into your vision channel for the images referenced above. Analyze them directly. DO NOT try to 'read()' binary JPG/PNG files using coding tools as they will only show you binary/base64 junk.]";
+			"\n\n[SYSTEM HINT: Image pixel data is loaded into your vision channel. Analyze directly — do not read image files with coding tools.]";
 	}
 	if (hasFiles) {
 		finalUserPrompt +=

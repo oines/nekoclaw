@@ -23,7 +23,7 @@ import type { MaintenanceExecutionResult, MaintenanceFinalizeDetails } from "./t
 import type { AgentSpec, WorkerPayload } from "../../types.js";
 
 const PersonaFinalizeSchema = Type.Object({
-	consumeObservationLines: Type.Optional(Type.Number({ description: "How many lines from the current observation backlog were fully incorporated." })),
+	consumeObservationLines: Type.Optional(Type.Number({ description: "Number of observation lines (counting from the top of the log) that have been processed into memory files and can be safely discarded." })),
 	summary: Type.Optional(Type.String({ description: "Short summary of what was changed in this maintenance run." })),
 });
 

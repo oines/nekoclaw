@@ -19,6 +19,7 @@ export function buildDreamPrompt(snapshot: DreamCorpusSnapshot): string {
 		"- Ensure every people/scenes file you keep or create has YAML frontmatter with title and a concise description for recall.",
 		"- You may delete low-value people/scenes files if forgetting them is appropriate, but only after updating index.md so references stay consistent.",
 		"- Never invent facts and never modify observations directly.",
+		"Observation line format (if you read any): [ISO_TIMESTAMP] channelType:senderId displayName: content",
 		"",
 		"Current corpus snapshot:",
 		`- index.md present: ${snapshot.indexSizeBytes > 0 ? "yes" : "no"}`,
@@ -29,6 +30,6 @@ export function buildDreamPrompt(snapshot: DreamCorpusSnapshot): string {
 		"Memory files manifest:",
 		snapshot.memoryManifestText,
 		"",
-		"Call persona_finalize exactly once when you are done. Dream must not consume observations, so finalize with consumeObservationLines=0.",
+		"Call persona_finalize exactly once when you are done. Dream must not consume observations, so always pass consumeObservationLines=0.",
 	].join("\n");
 }

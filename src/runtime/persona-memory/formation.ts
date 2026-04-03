@@ -1,9 +1,5 @@
-import type { InboundMessageEvent } from "../../types.js";
-import { collectEventText } from "./observations.js";
-
 export function buildFormationTurnPrompt(input: {
 	sceneRef: string;
-	event: InboundMessageEvent;
 	replyText: string;
 	sceneMemoryPath: string;
 	memoryManifestText: string;
@@ -12,14 +8,14 @@ export function buildFormationTurnPrompt(input: {
 		`Maintain persona memory for scene ${input.sceneRef}.`,
 		"",
 		"Use tools to inspect and revise the temporary persona workspace.",
-		"Required files to inspect:",
+		"Start by inspecting:",
 		"- index.md",
 		`- observations/${input.sceneRef}.log`,
 		`- ${input.sceneMemoryPath} (if it exists)`,
 		"",
-		`Current inbound message:\n${collectEventText(input.event) || "(empty)"}`,
-		"",
-		`Actual reply that was sent:\n${input.replyText || "(none)"}`,
+		"Observation line format: [ISO_TIMESTAMP] channelType:senderId displayName: content",
+		"The last line in the observation file is the message that just triggered this formation run.",
+		`The bot's reply to that message was:\n${input.replyText || "(none)"}`,
 		"",
 		"Goals:",
 		"- Preserve persona memory as Markdown prose.",
@@ -33,7 +29,7 @@ export function buildFormationTurnPrompt(input: {
 		"Memory files manifest:",
 		input.memoryManifestText,
 		"",
-		"- When you finish, call persona_finalize with the number of observation lines from this scene log that were fully incorporated.",
+		"When all edits are complete, call persona_finalize exactly once with the number of observation lines from this scene log that were fully incorporated into memory files.",
 	].join("\n");
 }
 
@@ -46,14 +42,15 @@ export function buildFormationBacklogPrompt(input: {
 		"",
 		"Inspect index.md, the scene observation log, and any relevant memory files you need.",
 		"Revise existing files with edit, create new people/scenes files with write when necessary, and do not delete files.",
-		"Any people/scenes file you touch should end with YAML frontmatter plus natural-language Markdown body.",
+		"Any people/scenes file you touch should have YAML frontmatter with title and description, followed by natural-language Markdown body.",
 		"Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
 		"Preserve corrections, identity links, uncertainty, and whether the bot was only observing.",
+		"Observation line format: [ISO_TIMESTAMP] channelType:senderId displayName: content",
 		`Primary observation file: observations/${input.sceneRef}.log`,
 		"",
 		"Memory files manifest:",
 		input.memoryManifestText,
 		"",
-		"When finished, call persona_finalize with how many observation lines were fully incorporated.",
+		"When all edits are complete, call persona_finalize exactly once with the number of observation lines that were fully incorporated into memory files.",
 	].join("\n");
 }
