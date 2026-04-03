@@ -428,6 +428,42 @@ async function expectNoOutboundDelta(context: ScenarioContext, chatId: string, p
 	assertCondition(currentCount === previousCount, `Expected no new outbound for chat ${chatId}, got ${currentCount - previousCount}`);
 }
 
+async function enqueueScheduledReminderAndWait(
+	context: ScenarioContext,
+	session: SessionRecord,
+	input: {
+		cronId: string;
+		message: string;
+		timezone: string;
+		scheduledFor: string;
+	},
+): Promise<void> {
+	await context.jobQueue.enqueue({
+		jobId: `scheduled:${input.cronId}:${input.scheduledFor}`,
+		agentId: context.agent.agentId,
+		kind: "scheduled",
+		sessionRecordId: session.sessionRecordId,
+		sessionKey: session.sessionKey,
+		createdAt: nowIso(),
+		event: {
+			eventType: "message.created",
+			channelType: session.channelType,
+			chatId: session.externalConversationId,
+			chatKind: session.chatKind,
+			chatTitle: session.chatTitle,
+			messageId: `scheduled:${input.cronId}`,
+			sender: {
+				displayName: "Scheduler",
+				externalId: "scheduler",
+			},
+			blocks: [{ kind: "text", text: `[Scheduled reminder due]\n${input.message}` }],
+			occurredAt: nowIso(),
+		},
+		scheduledReminder: input,
+	});
+	await waitForQueueIdle(context);
+}
+
 function knownModelRef(store: JsonNekoclawStore, agent: AgentSpec): string {
 	assertCondition(agent.provider && agent.modelId, `Agent ${agent.slug} has no configured model`);
 	return `${agent.provider}/${agent.modelId}`;
@@ -756,6 +792,94 @@ async function scenarioAdminReset(context: ScenarioContext): Promise<void> {
 	assertCondition(readFileSync(contextPath, "utf-8").trim() === "", "Expected /reset to clear the session context file");
 	const latest = context.store.getSession(context.agent.agentId, session.sessionRecordId);
 	assertCondition(!latest.modelOverride, "Expected /reset to clear the session model override");
+}
+
+async function scenarioScheduledSessionReminderDm(context: ScenarioContext): Promise<void> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "pair me for reminders",
+	});
+	const session = await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "Create a one-time session reminder and confirm with exactly: CRON_CREATED_DM",
+	});
+	await expectOutboundContains(context, context.dmUserId, "CRON_CREATED_DM");
+	const [cron] = context.store.listActiveSessionCrons(context.agent.agentId, session.sessionRecordId);
+	assertCondition(cron, "Expected an active DM cron");
+	await enqueueScheduledReminderAndWait(context, session, {
+		cronId: cron.cronId,
+		message: cron.message,
+		timezone: cron.timezone,
+		scheduledFor: cron.nextRunAt,
+	});
+	await expectAnyOutboundContains(context, context.dmUserId, "REMINDER_FIRED_DM");
+}
+
+async function scenarioScheduledSessionReminderGroup(context: ScenarioContext): Promise<void> {
+	presetGroupTrigger(context, "all");
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "Group User",
+		text: "/pair",
+		mentionBot: true,
+	});
+	const session = await acceptPendingPair(context, context.groupChatId);
+	await sendAndWait(context, {
+		chatKind: "group",
+		chatId: context.groupChatId,
+		senderId: context.groupUserId,
+		senderName: "Group User",
+		text: "Create a daily session reminder and confirm with exactly: CRON_CREATED_GROUP",
+	});
+	await expectOutboundContains(context, context.groupChatId, "CRON_CREATED_GROUP");
+	const [cron] = context.store.listActiveSessionCrons(context.agent.agentId, session.sessionRecordId);
+	assertCondition(cron, "Expected an active group cron");
+	await enqueueScheduledReminderAndWait(context, session, {
+		cronId: cron.cronId,
+		message: cron.message,
+		timezone: cron.timezone,
+		scheduledFor: cron.nextRunAt,
+	});
+	await expectAnyOutboundContains(context, context.groupChatId, "REMINDER_FIRED_GROUP");
+}
+
+async function scenarioScheduledReminderResetInvalidates(context: ScenarioContext): Promise<void> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "pair me for reset invalidation",
+	});
+	const session = await acceptPendingPair(context, context.dmUserId);
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "Create a reminder that should be invalidated by reset and confirm with exactly: CRON_CREATED_RESET",
+	});
+	await expectOutboundContains(context, context.dmUserId, "CRON_CREATED_RESET");
+	const [cron] = context.store.listActiveSessionCrons(context.agent.agentId, session.sessionRecordId);
+	assertCondition(cron, "Expected an active cron before reset");
+	const before = countOutbound(context.driver, context.dmUserId);
+	const reset = context.store.resetSession(context.agent.agentId, session.sessionRecordId);
+	assertCondition(reset.resetGeneration > 0, "Expected resetGeneration to increment");
+	assertCondition(
+		context.store.listActiveSessionCrons(context.agent.agentId, session.sessionRecordId).length === 0,
+		"Expected reset to invalidate active session crons",
+	);
+	assertCondition(context.store.getCron(cron.cronId)?.status === "invalidated", "Expected cron to be invalidated after reset");
+	await expectNoOutboundDelta(context, context.dmUserId, before);
 }
 
 async function scenarioAdminModelSessionOverride(context: ScenarioContext): Promise<void> {
@@ -1938,6 +2062,9 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "persona_dream_global_aging", channel: "telegram", run: scenarioDreamGlobalAging },
 	{ name: "persona_dream_find_missing_person", channel: "telegram", run: scenarioDreamFindsMissingPerson },
 	{ name: "persona_dream_preserves_identity", channel: "telegram", run: scenarioDreamPreservesIdentity },
+	{ name: "scheduled_session_reminder_dm", channel: "telegram", run: scenarioScheduledSessionReminderDm },
+	{ name: "scheduled_session_reminder_group", channel: "telegram", run: scenarioScheduledSessionReminderGroup },
+	{ name: "scheduled_reminder_reset_invalidates", channel: "telegram", run: scenarioScheduledReminderResetInvalidates },
 	{ name: "dm_pair_prompt", channel: "napcat", run: scenarioDmPairPrompt },
 	{ name: "dm_pair_accept_and_chat", channel: "napcat", run: scenarioDmPairAcceptAndChat },
 	{ name: "dm_context_continuity", channel: "napcat", run: scenarioDmContextContinuity },
@@ -1959,6 +2086,9 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "admin_reset", channel: "napcat", run: scenarioAdminReset },
 	{ name: "admin_model_session_override", channel: "napcat", run: scenarioAdminModelSessionOverride },
 	{ name: "persona_cross_platform_identity", channel: "napcat", run: scenarioPersonaCrossPlatformIdentity },
+	{ name: "scheduled_session_reminder_dm", channel: "napcat", run: scenarioScheduledSessionReminderDm },
+	{ name: "scheduled_session_reminder_group", channel: "napcat", run: scenarioScheduledSessionReminderGroup },
+	{ name: "scheduled_reminder_reset_invalidates", channel: "napcat", run: scenarioScheduledReminderResetInvalidates },
 ];
 
 class TelegramHarnessDriver implements HarnessDriver {

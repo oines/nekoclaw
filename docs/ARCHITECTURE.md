@@ -29,6 +29,7 @@
         │
         ▼
    Job Queue               ← 按 agent 串行化任务
+   Cron Poller             ← 轮询到期的定时提醒，生成 scheduled 任务
         │
         ▼
    Worker                  ← 隔离执行环境
@@ -65,8 +66,9 @@
 **同步循环（每 2 秒）：**
 1. 处理待执行的控制指令
 2. 同步 agent↔channel 绑定
-3. 为有观察积压的 agent 排队 Formation 扫描
-4. 为记忆语料库已变更的 agent 排队 Dream
+3. 轮询到期的定时提醒（cron），将到期任务作为 `scheduled` 类型 RunJob 入队
+4. 为有观察积压的 agent 排队 Formation 扫描
+5. 为记忆语料库已变更的 agent 排队 Dream
 
 ### 2. Channel Plugin（平台插件）
 
@@ -174,6 +176,8 @@ delete            删除消息
 typing            显示输入状态
 send_targeted     主动向其他会话发消息
 no_reply          明确抑制默认回复
+cron_create       创建定时提醒
+cron_cancel       取消定时提醒
 ```
 
 **路径重定向：** Agent 在容器内向 `/workspace/...` 写文件，Dispatch 在发送附件前将路径重定向到宿主机文件系统。
@@ -393,6 +397,7 @@ Handle：{handle1}, {handle2}
 - 用 `message(send)` 在当前会话回复
 - 用 `send_message` 主动联系其他会话
 - 用 `no_reply` 表示沉默是正确的选择
+- 用 `cron` 创建、列出或取消定时提醒
 - 用 `read` 按需加载详细记忆文件
 ```
 
@@ -412,6 +417,7 @@ Agent 在一轮对话中可用的工具：
 | `get_group_members(groupRef)` | 获取特定群组的成员 |
 | `get_contact_detail(account)` | 获取特定联系人的详情 |
 | `session_status()` | 查看当前会话的能力 |
+| `cron(action, ...)` | 创建/列出/取消当前会话的定时提醒 |
 | `read(path)` | 读取记忆文件（索引、people/*、scenes/*、observations/*） |
 | `bash(cmd)` | 在工作区执行 shell 命令 |
 | `read_file(path)` | 读取工作区文件 |
@@ -429,6 +435,7 @@ Agent 在一轮对话中可用的工具：
 │   ├── agents/{agentId}.json        # 每个 agent 的运行时状态
 │   ├── queues/{agentId}.jsonl       # 任务队列持久化
 │   ├── audit/{agentId}.jsonl        # 审计日志
+│   ├── crons/{cronId}.json          # 定时提醒记录
 │   ├── pairs/{pairingId}.json       # 待处理的配对请求
 │   ├── control/{requestId}.json     # 运行时控制指令
 │   └── process.json                 # 守护进程状态
@@ -486,6 +493,53 @@ Worker 通过 `WorkerPayload` 接收所需的一切，通过 `WorkerResult` 返�
 
 ### 沉默是一等公民操作
 `no_reply` 是一个显式工具，而不是"没有操作"。Agent 主动决定保持沉默。这在群组场景中很重要——对每条消息都回复是不自然的。
+
+---
+
+## 定时提醒（Session Cron）
+
+Agent 可以在对话中通过 `cron` 工具为当前会话创建定时提醒。提醒到期时，daemon 会自动将其作为 `scheduled` 类型的 RunJob 入队，Worker 以主动提醒的方式投递到原会话。
+
+### 调度类型
+
+| 类型 | 说明 | 必需参数 |
+|------|------|----------|
+| `once` | 一次性提醒，到期后标记为 `completed` | `runAtLocal`（`YYYY-MM-DDTHH:mm`） |
+| `daily` | 每日重复，到期后自动推进到下一天 | `hour`（0-23）、`minute`（0-59） |
+
+### 时区处理
+
+- 默认使用服务器本地时区（`Intl.DateTimeFormat`）
+- 可指定任意 IANA 时区（如 `Asia/Shanghai`）
+- 所有计算通过 `Intl.DateTimeFormat` 完成，正确处理 DST 过渡
+
+### 生命周期
+
+```
+active → completed     (once 类型到期执行后)
+active → active        (daily 类型到期执行后，nextRunAt 推进到下一天)
+active → canceled      (agent 主动取消)
+active → invalidated   (会话重置或会话失活时自动失效)
+```
+
+### 会话绑定
+
+- 每个 cron 绑定到创建它的 `sessionRecordId`，并记录创建时的 `resetGeneration`
+- 会话重置（`resetSession`）时，该会话下所有 active cron 自动标记为 `invalidated`
+- Daemon 轮询时额外检查：若会话已不活跃或 `resetGeneration` 不匹配，cron 也会被失效
+- 取消操作有会话作用域校验——只能取消自己会话的 cron
+
+### Daemon 轮询
+
+Daemon 同步循环中调用 `processDueCrons()`：
+1. 列出所有 `nextRunAt ≤ now` 且 `status === "active"` 的 cron
+2. 校验关联会话仍然有效
+3. 构造 `scheduled` 类型 RunJob（包含 `scheduledReminder` 字段），入队执行
+4. `once` 类型 → `completeCron()`；`daily` 类型 → `advanceDailyCron()`（推进 nextRunAt）
+
+### 存储
+
+Cron 记录以 JSON 文件存储在 `~/.nekoclaw/runtime/crons/{cronId}.json`，删除 agent 时同步清理。
 
 ---
 

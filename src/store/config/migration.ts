@@ -111,6 +111,7 @@ export function migrateLegacyConfigIfNeeded(paths: StorePaths): void {
 						parentSessionKey: session.parentSessionKey,
 						threadId: session.threadId,
 						lastRoute: session.lastRoute,
+						resetGeneration: 0,
 						status: session.status,
 						pairedAt: session.createdAt,
 						updatedAt: session.updatedAt,

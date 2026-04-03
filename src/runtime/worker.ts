@@ -109,7 +109,9 @@ ${payload.personaContext.sceneObservations}`
 - ONLY use the \`message\` tool for advanced actions in the current session: explicit current-session send/reply/edit/delete/typing.
 - Use the \`send_message\` tool when you need to proactively message another known contact or group outside the current session.
 - Use the \`session_status\` tool to inspect current session capabilities before choosing a messaging action.
+- The server local timezone for reminder scheduling is ${payload.serverTimezone}.
 - Use \`list_contacts\`, \`list_groups\`, \`get_group_members\`, and \`get_contact_detail\` to inspect the runtime-known directory snapshot.
+- Use the \`cron\` tool to create, inspect, or cancel reminders bound to the current session. Never invent or ask for a session key.
 - Use the \`no_reply\` tool when the best action is to intentionally stay silent.
 - If Persona memory context is present, treat it as the authoritative memory substrate for people and past events.
 - The persona index is always-on high-level context. If you need detailed memory about a person or scene, use the built-in \`read\` tool to open the specific file path referenced in index.md under \`.nekoclaw-persona/memory/\`.
@@ -129,6 +131,7 @@ ${hasCurrentImages
 - Chat type: ${payload.currentSession.chatKind}
 - External conversation id: ${payload.currentSession.externalConversationId}
 - Parent session key: ${payload.currentSession.parentSessionKey ?? "(none)"}
+- Server local timezone: ${payload.serverTimezone}
 ${identityLines.length > 0 ? identityLines.join("\n") : ""}
 
 ${personaSections}
@@ -146,6 +149,12 @@ function buildPrompt(payload: WorkerPayload, hasImages: boolean, hasFiles: boole
 	const sender = [payload.job.event.sender.displayName, payload.job.event.sender.externalId].filter(Boolean).join(" / ");
 	const lines = [
 		payload.job.event.eventType ? `Event: ${payload.job.event.eventType}` : undefined,
+		payload.scheduledReminder
+			? `Scheduled reminder due: ${payload.scheduledReminder.scheduledFor} (${payload.scheduledReminder.timezone})`
+			: undefined,
+		payload.scheduledReminder
+			? `Reminder request: ${payload.scheduledReminder.message}`
+			: undefined,
 		sender ? `Sender: ${sender}` : undefined,
 		payload.job.event.replyToMessageId ? `Replying to message: ${payload.job.event.replyToMessageId}` : undefined,
 		"Content:",
@@ -265,6 +274,8 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 		event: payload.job.event,
 		capabilities: payload.capabilities,
 		runtimeDirectory: payload.runtimeDirectory,
+		serverTimezone: payload.serverTimezone,
+		sessionCrons: payload.sessionCrons,
 		isExplicitlyAddressed: payload.selfIdentity?.isExplicitlyAddressed,
 		recordAction: (action: ChannelToolAction) => {
 			toolActions.push(action);
@@ -305,6 +316,10 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	(session.state as { messages: Message[] }).messages = shapedMessages;
 
 	let finalUserPrompt = buildPrompt(payload, images.length > 0, hasFiles);
+	if (payload.scheduledReminder) {
+		finalUserPrompt =
+			`[SYSTEM HINT: This is a scheduled reminder firing for the current paired session. The reminder request was previously configured as: ${payload.scheduledReminder.message}. You are not responding to a fresh user message; you are proactively delivering the reminder in this same session.]\n\n${finalUserPrompt}`;
+	}
 	if (images.length > 0) {
 		finalUserPrompt +=
 			"\n\n[SYSTEM HINT: I've loaded image pixel data into your vision channel for the images referenced above. Analyze them directly. DO NOT try to 'read()' binary JPG/PNG files using coding tools as they will only show you binary/base64 junk.]";

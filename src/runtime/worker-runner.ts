@@ -65,6 +65,9 @@ export class WorkerRunnerService {
 			capabilities: plugin?.capabilities ?? { text: true, media: false, reply: false, edit: false, delete: false, typing: false },
 			runtimeDirectory,
 			personaContext,
+			scheduledReminder: job.scheduledReminder,
+			serverTimezone: this.store.getDefaultCronTimezone(),
+			sessionCrons: this.store.listActiveSessionCrons(agent.agentId, session.sessionRecordId),
 			selfIdentity: this.getSelfIdentity(plugin, job),
 			effectiveModel,
 		};

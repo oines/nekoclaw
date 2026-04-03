@@ -103,6 +103,7 @@ export function normalizeSessionConfig(agentSlug: string, session: SessionConfig
 			session.lastRoute,
 		),
 		modelOverride,
+		resetGeneration: typeof session.resetGeneration === "number" ? session.resetGeneration : 0,
 	};
 }
 
@@ -210,6 +211,7 @@ export function normalizeSessionRecord(
 		chatTitle: normalized.chatTitle,
 		lastRoute: normalized.lastRoute,
 		modelOverride: normalized.modelOverride,
+		resetGeneration: normalized.resetGeneration,
 		status: normalized.status,
 		createdAt: normalized.pairedAt,
 		updatedAt: normalized.updatedAt,

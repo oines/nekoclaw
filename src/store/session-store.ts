@@ -104,6 +104,7 @@ export class SessionStore {
 					threadId: input.threadId,
 					updatedAt: timestamp,
 				},
+				resetGeneration: 0,
 				status: "active",
 				pairedAt: timestamp,
 				updatedAt: timestamp,
@@ -195,7 +196,15 @@ export class SessionStore {
 		const { slug, config } = this.repo.getAgentEntry(agentRef);
 		const current = this.getSession(config.agentId, sessionRef);
 		writeFileSync(this.paths.getSessionContextPath(slug, current.sessionRecordId), "", "utf-8");
-		return this.clearSessionModelOverride(config.agentId, current.sessionRecordId);
+		const updatedAt = nowIso();
+		this.repo.updateConfig((storeConfig) => {
+			const session = storeConfig.agents[slug].sessions[current.sessionRecordId];
+			session.modelOverride = undefined;
+			session.resetGeneration = (session.resetGeneration ?? 0) + 1;
+			session.updatedAt = updatedAt;
+			storeConfig.agents[slug].updatedAt = updatedAt;
+		});
+		return this.getSession(config.agentId, current.sessionRecordId);
 	}
 
 	removeSession(agentRef: string, ref: string, options?: { purge?: boolean }): SessionRecord {

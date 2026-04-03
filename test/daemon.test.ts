@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -234,5 +234,128 @@ describe("nekoclaw daemon", () => {
 		expect(dreamSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId: idleAgent.agentId }));
 		expect(skipSpy).toHaveBeenCalledTimes(1);
 		expect(skipSpy).toHaveBeenCalledWith(expect.objectContaining({ agentId: busyAgent.agentId }), "agent_busy");
+	});
+
+	it("enqueues due one-time crons as scheduled jobs and marks them completed", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { NekoclawDaemon } = await import("../src/runtime/daemon.js");
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "cron-once-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "123",
+			chatKind: "dm",
+		});
+		const cron = store.createSessionCron(agent.agentId, session.sessionRecordId, {
+			scheduleKind: "once",
+			message: "send the report",
+			runAtLocal: "2000-01-01T07:00",
+			timezone: "UTC",
+		});
+		const daemon = new NekoclawDaemon(store);
+		const daemonState = daemon as unknown as {
+			processDueCrons(): Promise<void>;
+		};
+		const enqueueSpy = vi.spyOn(daemon, "enqueue").mockResolvedValue(undefined);
+
+		await daemonState.processDueCrons();
+
+		expect(enqueueSpy).toHaveBeenCalledTimes(1);
+		expect(enqueueSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "scheduled",
+				sessionRecordId: session.sessionRecordId,
+				scheduledReminder: expect.objectContaining({
+					cronId: cron.cronId,
+					message: "send the report",
+					timezone: "UTC",
+				}),
+				event: expect.objectContaining({
+					sender: expect.objectContaining({ displayName: "Scheduler" }),
+					blocks: [{ kind: "text", text: "[Scheduled reminder due]\nsend the report" }],
+				}),
+			}),
+		);
+		expect(store.getCron(cron.cronId)?.status).toBe("completed");
+	});
+
+	it("advances due daily crons after enqueueing one scheduled job", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { NekoclawDaemon } = await import("../src/runtime/daemon.js");
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "cron-daily-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "123",
+			chatKind: "group",
+			chatTitle: "Cron Group",
+		});
+		const cron = store.createSessionCron(agent.agentId, session.sessionRecordId, {
+			scheduleKind: "daily",
+			message: "daily standup",
+			hour: 7,
+			minute: 0,
+			timezone: "UTC",
+		});
+		const cronPath = store.getCronPath(cron.cronId);
+		const storedCron = JSON.parse(readFileSync(cronPath, "utf-8")) as Record<string, unknown>;
+		storedCron.nextRunAt = "2000-01-01T07:00:00.000Z";
+		writeFileSync(cronPath, `${JSON.stringify(storedCron, null, 2)}\n`, "utf-8");
+		const daemon = new NekoclawDaemon(store);
+		const daemonState = daemon as unknown as {
+			processDueCrons(): Promise<void>;
+		};
+		const enqueueSpy = vi.spyOn(daemon, "enqueue").mockResolvedValue(undefined);
+
+		await daemonState.processDueCrons();
+
+		expect(enqueueSpy).toHaveBeenCalledTimes(1);
+		const updated = store.getCron(cron.cronId);
+		expect(updated?.status).toBe("active");
+		expect(updated?.lastTriggeredAt).toBeTruthy();
+		expect(updated?.nextRunAt).not.toBe("2000-01-01T07:00:00.000Z");
+	});
+
+	it("invalidates due crons when the bound session was reset or removed", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { NekoclawDaemon } = await import("../src/runtime/daemon.js");
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "cron-stale-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "456",
+			chatKind: "group",
+			chatTitle: "QQ Group",
+		});
+		const resetCron = store.createSessionCron(agent.agentId, session.sessionRecordId, {
+			scheduleKind: "once",
+			message: "stale reset cron",
+			runAtLocal: "2000-01-01T07:00",
+			timezone: "UTC",
+		});
+		store.resetSession(agent.agentId, session.sessionRecordId);
+		const removedSession = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "789",
+			chatKind: "dm",
+		});
+		const removedCron = store.createSessionCron(agent.agentId, removedSession.sessionRecordId, {
+			scheduleKind: "once",
+			message: "missing session cron",
+			runAtLocal: "2000-01-01T07:00",
+			timezone: "UTC",
+		});
+		store.removeSession(agent.agentId, removedSession.sessionRecordId, { purge: true });
+		const daemon = new NekoclawDaemon(store);
+		const daemonState = daemon as unknown as {
+			processDueCrons(): Promise<void>;
+		};
+		const enqueueSpy = vi.spyOn(daemon, "enqueue").mockResolvedValue(undefined);
+
+		await daemonState.processDueCrons();
+
+		expect(enqueueSpy).not.toHaveBeenCalled();
+		expect(store.getCron(resetCron.cronId)?.status).toBe("invalidated");
+		expect(store.getCron(removedCron.cronId)?.status).toBe("invalidated");
 	});
 	});

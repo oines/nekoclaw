@@ -152,6 +152,20 @@ export class OutboundDispatchService {
 				case "typing":
 					await plugin.actions.typing({ chatId: session.externalConversationId });
 					break;
+				case "cron_create":
+					this.store.createSessionCron(agent.agentId, session.sessionRecordId, {
+						cronId: action.cronId,
+						scheduleKind: action.scheduleKind,
+						message: action.message,
+						timezone: action.timezone,
+						runAtLocal: action.runAtLocal,
+						hour: action.hour,
+						minute: action.minute,
+					});
+					break;
+				case "cron_cancel":
+					this.store.cancelSessionCron(agent.agentId, session.sessionRecordId, action.cronId);
+					break;
 				case "no_reply":
 					break;
 			}

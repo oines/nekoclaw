@@ -15,12 +15,14 @@ import type {
 	RuntimeControlAction,
 	RuntimeProcessState,
 	RuntimeState,
+	SessionCronRecord,
 	SessionRecord,
 } from "../types.js";
 import { AgentStore, type CreateAgentInput, type UpdateAgentInput } from "./agent-store.js";
 import { AuditStore } from "./audit-store.js";
 import { ChannelStore } from "./channel-store.js";
 import { ConfigRepository } from "./config-repository.js";
+import { CronStore } from "./cron-store.js";
 import { nowIso } from "./helpers.js";
 import { ModelStore } from "./model-store.js";
 import { PairStore } from "./pair-store.js";
@@ -48,6 +50,8 @@ export class JsonNekoclawStore {
 	private readonly pairs = new PairStore(this.repo, this.paths);
 
 	private readonly runtime = new RuntimeStateStore(this.paths);
+
+	private readonly crons = new CronStore(this.paths);
 
 	// #region Filesystem Paths
 
@@ -147,6 +151,10 @@ export class JsonNekoclawStore {
 		return this.paths.getRuntimeControlPath(requestId);
 	}
 
+	getCronPath(cronId: string): string {
+		return this.paths.getCronPath(cronId);
+	}
+
 	// #endregion
 
 	// #region Core Initialization & Misc
@@ -238,6 +246,7 @@ export class JsonNekoclawStore {
 		for (const session of activeSessions) {
 			this.removeSession(agent.agentId, session.sessionRecordId, { purge: true });
 		}
+		this.crons.deleteCronsForAgent(agent.agentId);
 		this.pairs.deletePairsForAgent(agent.agentId);
 		this.runtime.removeAgentArtifacts(agent.agentId);
 		this.agents.removeWorkspace(agent.slug);
@@ -404,21 +413,118 @@ export class JsonNekoclawStore {
 
 	resetSession(agentRef: string, sessionRef: string): SessionRecord {
 		const session = this.sessions.resetSession(agentRef, sessionRef);
+		const invalidated = this.crons.invalidateSessionCrons(session.agentId, session.sessionRecordId);
 		this.audit(session.agentId, "session.reset", {
 			sessionRecordId: session.sessionRecordId,
 			sessionKey: session.sessionKey,
+			resetGeneration: session.resetGeneration,
+			invalidatedCronCount: invalidated.length,
 		});
 		return session;
 	}
 
 	removeSession(agentRef: string, ref: string, options?: { purge?: boolean }): SessionRecord {
 		const session = this.sessions.removeSession(agentRef, ref, options);
+		this.crons.invalidateSessionCrons(session.agentId, session.sessionRecordId);
 		this.audit(session.agentId, "session.removed", {
 			sessionRecordId: session.sessionRecordId,
 			sessionKey: session.sessionKey,
 			purge: Boolean(options?.purge),
 		});
 		return session;
+	}
+
+	listActiveSessionCrons(agentRef: string, sessionRef: string): SessionCronRecord[] {
+		const session = this.getSession(agentRef, sessionRef);
+		return this.crons.listActiveSessionCrons(session.agentId, session.sessionRecordId);
+	}
+
+	createSessionCron(
+		agentRef: string,
+		sessionRef: string,
+		input: {
+			cronId?: string;
+			scheduleKind: SessionCronRecord["scheduleKind"];
+			message: string;
+			timezone?: string;
+			runAtLocal?: string;
+			hour?: number;
+			minute?: number;
+		},
+	): SessionCronRecord {
+		const session = this.getSession(agentRef, sessionRef);
+		const cron = this.crons.createSessionCron({
+			...input,
+			agentId: session.agentId,
+			sessionRecordId: session.sessionRecordId,
+			sessionKey: session.sessionKey,
+			channelType: session.channelType,
+			chatKind: session.chatKind,
+			externalConversationId: session.externalConversationId,
+			threadId: session.threadId,
+			chatTitle: session.chatTitle,
+			createdFromResetGeneration: session.resetGeneration,
+		});
+		this.audit(session.agentId, "cron.created", {
+			cronId: cron.cronId,
+			sessionRecordId: session.sessionRecordId,
+			scheduleKind: cron.scheduleKind,
+			nextRunAt: cron.nextRunAt,
+		});
+		return cron;
+	}
+
+	cancelSessionCron(agentRef: string, sessionRef: string, cronId: string): SessionCronRecord {
+		const session = this.getSession(agentRef, sessionRef);
+		const cron = this.crons.cancelSessionCron(session.agentId, session.sessionRecordId, cronId);
+		this.audit(session.agentId, "cron.canceled", {
+			cronId: cron.cronId,
+			sessionRecordId: session.sessionRecordId,
+		});
+		return cron;
+	}
+
+	listDueCrons(at?: Date): SessionCronRecord[] {
+		return this.crons.listDueCrons(at);
+	}
+
+	completeCron(cronId: string, triggeredAt: string): SessionCronRecord {
+		const cron = this.crons.completeCron(cronId, triggeredAt);
+		this.audit(cron.agentId, "cron.completed", {
+			cronId: cron.cronId,
+			sessionRecordId: cron.sessionRecordId,
+			triggeredAt,
+		});
+		return cron;
+	}
+
+	advanceDailyCron(cronId: string, triggeredAt: string): SessionCronRecord {
+		const cron = this.crons.advanceDailyCron(cronId, triggeredAt);
+		this.audit(cron.agentId, "cron.advanced", {
+			cronId: cron.cronId,
+			sessionRecordId: cron.sessionRecordId,
+			triggeredAt,
+			nextRunAt: cron.nextRunAt,
+		});
+		return cron;
+	}
+
+	invalidateCron(cronId: string, reason?: string): SessionCronRecord {
+		const cron = this.crons.invalidateCron(cronId);
+		this.audit(cron.agentId, "cron.invalidated", {
+			cronId: cron.cronId,
+			sessionRecordId: cron.sessionRecordId,
+			reason,
+		});
+		return cron;
+	}
+
+	getCron(cronId: string): SessionCronRecord | undefined {
+		return this.crons.getCron(cronId);
+	}
+
+	getDefaultCronTimezone(): string {
+		return this.crons.getDefaultTimezone();
 	}
 
 	// #endregion

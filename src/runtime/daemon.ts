@@ -50,10 +50,12 @@ export class NekoclawDaemon {
 		this.jobQueue.initialize();
 		await this.processRuntimeControlActions();
 		await this.channelRuntime.syncAgents();
+		await this.processDueCrons();
 		this.queuePersonaBacklogSweeps();
 		this.syncTimer = setInterval(() => {
 			void this.processRuntimeControlActions().then(() => {
 				void this.channelRuntime.syncAgents();
+				void this.processDueCrons();
 				this.queuePersonaBacklogSweeps();
 			});
 		}, 2_000);
@@ -167,6 +169,62 @@ export class NekoclawDaemon {
 			}
 			this.personaMemory.queueBacklogSweep(agent);
 			this.personaMemory.queueDream(agent);
+		}
+	}
+
+	private async processDueCrons(): Promise<void> {
+		for (const cron of this.store.listDueCrons()) {
+			try {
+				const session = this.store.getSession(cron.agentId, cron.sessionRecordId);
+				if (session.status !== "active" || session.resetGeneration !== cron.createdFromResetGeneration) {
+					this.store.invalidateCron(cron.cronId, session.status !== "active" ? "session_inactive" : "reset_generation_mismatch");
+					continue;
+				}
+				const scheduledFor = cron.nextRunAt;
+				await this.enqueue({
+					jobId: `scheduled:${cron.cronId}:${scheduledFor}`,
+					agentId: cron.agentId,
+					kind: "scheduled",
+					sessionRecordId: session.sessionRecordId,
+					sessionKey: session.sessionKey,
+					createdAt: nowIso(),
+					event: {
+						eventType: "message.created",
+						channelType: session.channelType,
+						chatId: session.externalConversationId,
+						chatKind: session.chatKind,
+						chatTitle: session.chatTitle,
+						messageId: `scheduled:${cron.cronId}:${scheduledFor}`,
+						sender: {
+							displayName: "Scheduler",
+							externalId: "scheduler",
+						},
+						blocks: [{ kind: "text", text: `[Scheduled reminder due]\n${cron.message}` }],
+						occurredAt: nowIso(),
+					},
+					scheduledReminder: {
+						cronId: cron.cronId,
+						message: cron.message,
+						timezone: cron.timezone,
+						scheduledFor,
+					},
+				});
+				if (cron.scheduleKind === "once") {
+					this.store.completeCron(cron.cronId, nowIso());
+				} else {
+					this.store.advanceDailyCron(cron.cronId, nowIso());
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (/Unknown session/.test(message)) {
+					this.store.invalidateCron(cron.cronId, "missing_session");
+					continue;
+				}
+				this.store.audit(cron.agentId, "cron.poll_error", {
+					cronId: cron.cronId,
+					error: message,
+				});
+			}
 		}
 	}
 }

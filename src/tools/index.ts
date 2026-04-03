@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox";
 import { codingTools, type ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { parseTargetRef } from "../runtime/runtime-directory.js";
+import { normalizeTimezone, validateDailyTimePart, validateRunAtLocal } from "../store/cron-schedule.js";
 import {
 	SESSION_COMPACTION_SETTINGS,
 	SESSION_PRUNING_ENABLED,
@@ -51,6 +53,16 @@ const SendMessageParameters = Type.Object({
 
 const SessionStatusParameters = Type.Object({});
 const NoReplyParameters = Type.Object({});
+const CronToolParameters = Type.Object({
+	action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("cancel")]),
+	cronId: Type.Optional(Type.String()),
+	scheduleKind: Type.Optional(Type.Union([Type.Literal("once"), Type.Literal("daily")])),
+	message: Type.Optional(Type.String()),
+	runAtLocal: Type.Optional(Type.String({ description: "One-time local wall-clock timestamp like 2026-04-03T07:00." })),
+	hour: Type.Optional(Type.Number()),
+	minute: Type.Optional(Type.Number()),
+	timezone: Type.Optional(Type.String({ description: "IANA timezone like Asia/Shanghai. Defaults to the server local timezone." })),
+});
 
 type MessageToolInput = Static<typeof MessageToolParameters>;
 type ListContactsInput = Static<typeof ListContactsParameters>;
@@ -58,6 +70,7 @@ type ListGroupsInput = Static<typeof ListGroupsParameters>;
 type GetGroupMembersInput = Static<typeof GetGroupMembersParameters>;
 type GetContactDetailInput = Static<typeof GetContactDetailParameters>;
 type SendMessageInput = Static<typeof SendMessageParameters>;
+type CronToolInput = Static<typeof CronToolParameters>;
 
 function hasRenderableContent(text: string | undefined, attachments: OutboundAttachment[] | undefined): boolean {
 	return Boolean(text?.trim()) || Boolean(attachments?.length);
@@ -367,6 +380,8 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 					inboundMessageId: context.event.messageId,
 					replyToMessageId: context.event.replyToMessageId,
 					availableChannels: context.runtimeDirectory.availableChannels,
+					timezone: context.serverTimezone,
+					activeCronCount: context.sessionCrons.length,
 					compaction: {
 						enabled: Boolean(SESSION_COMPACTION_SETTINGS.enabled),
 						reserveTokens: SESSION_COMPACTION_SETTINGS.reserveTokens,
@@ -382,6 +397,97 @@ function createSessionStatusTool(context: ChannelToolContext): ToolDefinition {
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
 				details: summary,
+			};
+		},
+	};
+}
+
+function createCronTool(context: ChannelToolContext): ToolDefinition {
+	return {
+		name: "cron",
+		label: "Cron",
+		description: "Create, inspect, or cancel reminders that are automatically bound to the current session.",
+		promptSnippet:
+			"cron(action, ...): create/list/cancel reminders for THIS session only. The session is auto-bound; never provide a session key.",
+		promptGuidelines: [
+			"Use this when the user asks to be reminded later in this same DM or group.",
+			"Default timezone is the server local timezone shown by session_status.",
+			"Use action='create' with scheduleKind='once' plus runAtLocal for a one-time reminder, or scheduleKind='daily' plus hour/minute for a daily reminder.",
+			"Use action='list' to inspect active reminders in the current session before canceling one.",
+			"Use action='cancel' with a cronId returned by list. Cancellation is scoped to the current session.",
+		],
+		parameters: CronToolParameters,
+		execute: async (_toolCallId, params) => {
+			const input = params as CronToolInput;
+			if (input.action === "list") {
+				return {
+					content: [{ type: "text", text: JSON.stringify(context.sessionCrons, null, 2) }],
+					details: { crons: context.sessionCrons },
+				};
+			}
+
+			if (input.action === "cancel") {
+				const cronId = input.cronId?.trim();
+				if (!cronId) {
+					throw new Error("cancel requires cronId");
+				}
+				const cron = context.sessionCrons.find((entry) => entry.cronId === cronId);
+				if (!cron) {
+					throw new Error(`Unknown cron "${cronId}" in the current session`);
+				}
+				context.recordAction({
+					kind: "cron_cancel",
+					cronId,
+				});
+				return {
+					content: [{ type: "text", text: `Queued cancellation for session reminder ${cronId}.` }],
+					details: { kind: "cron_cancel", cronId },
+				};
+			}
+
+			if (input.action !== "create") {
+				throw new Error(`Unsupported cron action "${input.action}"`);
+			}
+			const scheduleKind = input.scheduleKind;
+			if (!scheduleKind) {
+				throw new Error("create requires scheduleKind");
+			}
+			const message = input.message?.trim();
+			if (!message) {
+				throw new Error("create requires message");
+			}
+			const timezone = normalizeTimezone(input.timezone ?? context.serverTimezone);
+			let runAtLocal: string | undefined;
+			let hour: number | undefined;
+			let minute: number | undefined;
+			if (scheduleKind === "once") {
+				runAtLocal = validateRunAtLocal(input.runAtLocal ?? "");
+			} else {
+				hour = validateDailyTimePart("hour", input.hour ?? Number.NaN, 23);
+				minute = validateDailyTimePart("minute", input.minute ?? Number.NaN, 59);
+			}
+			const cronId = randomUUID();
+			context.recordAction({
+				kind: "cron_create",
+				cronId,
+				scheduleKind,
+				message,
+				timezone,
+				runAtLocal,
+				hour,
+				minute,
+			});
+			return {
+				content: [{ type: "text", text: `Queued a ${scheduleKind} reminder for this session.` }],
+				details: {
+					kind: "cron_create",
+					cronId,
+					scheduleKind,
+					timezone,
+					runAtLocal,
+					hour,
+					minute,
+				},
 			};
 		},
 	};
@@ -414,6 +520,7 @@ export function createNekoclawTools(context: ChannelToolContext): ToolDefinition
 		createGetContactDetailTool(context),
 		createSendMessageTool(context),
 		createSessionStatusTool(context),
+		createCronTool(context),
 	];
 	if (shouldExposeNoReplyTool(context)) {
 		tools.push(createNoReplyTool(context));

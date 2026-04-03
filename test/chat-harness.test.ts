@@ -205,4 +205,96 @@ describe("internal chat harness", () => {
 			expect(proactiveResult?.evidence.transcript.some((entry) => entry.kind === "outbound" && entry.text?.includes("HARNESS_TARGET_OK"))).toBe(true);
 		}
 	}, 20_000);
+
+	it("runs scheduled reminder harness scenarios for telegram and napcat across dm, group, and reset invalidation", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { runChatHarnessInCurrentEnvironment } = await import("../src/internal/chat-harness/current-env.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "harness-cron-cat" });
+		store.setBuiltinModelConfig(agent.agentId, {
+			provider: "openai",
+			modelId: "gpt-5",
+			apiKey: "test-key",
+		});
+
+		const executeJob = async (job: RunJob): Promise<WorkerResult> => {
+			const text = extractText(job);
+			if (job.kind === "scheduled") {
+				return {
+					outbound: {
+						text: job.event.chatKind === "group" ? "REMINDER_FIRED_GROUP" : "REMINDER_FIRED_DM",
+					},
+				};
+			}
+			if (text.includes("Create a one-time session reminder and confirm with exactly: CRON_CREATED_DM")) {
+				const cronId = `cron-harness-dm-${job.event.channelType}`;
+				return {
+					outbound: { text: "CRON_CREATED_DM" },
+					toolActions: [
+						{
+							kind: "cron_create",
+							cronId,
+							scheduleKind: "once",
+							message: "DM reminder",
+							timezone: "Asia/Shanghai",
+							runAtLocal: "2099-01-01T07:00",
+						},
+					],
+				};
+			}
+			if (text.includes("Create a daily session reminder and confirm with exactly: CRON_CREATED_GROUP")) {
+				const cronId = `cron-harness-group-${job.event.channelType}`;
+				return {
+					outbound: { text: "CRON_CREATED_GROUP" },
+					toolActions: [
+						{
+							kind: "cron_create",
+							cronId,
+							scheduleKind: "daily",
+							message: "Group reminder",
+							timezone: "Asia/Shanghai",
+							hour: 7,
+							minute: 0,
+						},
+					],
+				};
+			}
+			if (text.includes("Create a reminder that should be invalidated by reset and confirm with exactly: CRON_CREATED_RESET")) {
+				const cronId = `cron-harness-reset-${job.event.channelType}`;
+				return {
+					outbound: { text: "CRON_CREATED_RESET" },
+					toolActions: [
+						{
+							kind: "cron_create",
+							cronId,
+							scheduleKind: "once",
+							message: "Reset reminder",
+							timezone: "Asia/Shanghai",
+							runAtLocal: "2099-01-01T08:00",
+						},
+					],
+				};
+			}
+			return { outbound: { text: "stub response" } };
+		};
+
+		const report = await runChatHarnessInCurrentEnvironment({
+			agentRef: agent.agentId,
+			channel: "both",
+			timeoutMs: 5_000,
+			scenario: [
+				"scheduled_session_reminder_dm",
+				"scheduled_session_reminder_group",
+				"scheduled_reminder_reset_invalidates",
+			],
+			executeJob,
+		});
+
+		expect(report.ok).toBe(true);
+		expect(report.results).toHaveLength(6);
+		expect(report.results.every((result) => result.status === "passed")).toBe(true);
+		expect(report.results.some((result) => result.channel === "telegram" && result.name === "scheduled_session_reminder_dm")).toBe(true);
+		expect(report.results.some((result) => result.channel === "napcat" && result.name === "scheduled_session_reminder_group")).toBe(true);
+	});
 	});

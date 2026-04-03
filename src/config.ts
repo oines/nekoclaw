@@ -20,6 +20,7 @@ export const NEKOCLAW_RUNTIME_QUEUES_DIR = join(NEKOCLAW_RUNTIME_DIR, "queues");
 export const NEKOCLAW_RUNTIME_AUDIT_DIR = join(NEKOCLAW_RUNTIME_DIR, "audit");
 export const NEKOCLAW_RUNTIME_PAIRS_DIR = join(NEKOCLAW_RUNTIME_DIR, "pairs");
 export const NEKOCLAW_RUNTIME_CONTROL_DIR = join(NEKOCLAW_RUNTIME_DIR, "control");
+export const NEKOCLAW_RUNTIME_CRONS_DIR = join(NEKOCLAW_RUNTIME_DIR, "crons");
 export const NEKOCLAW_RUNTIME_PROCESS_STATE_PATH = join(NEKOCLAW_RUNTIME_DIR, "process.json");
 
 export const NEKOCLAW_CONTAINER_WORKSPACE_DIR = "/workspace";
@@ -35,6 +36,7 @@ export function ensureNekoclawLayout(): void {
 		NEKOCLAW_RUNTIME_AUDIT_DIR,
 		NEKOCLAW_RUNTIME_PAIRS_DIR,
 		NEKOCLAW_RUNTIME_CONTROL_DIR,
+		NEKOCLAW_RUNTIME_CRONS_DIR,
 		NEKOCLAW_WORKSPACES_DIR,
 	];
 	for (const dir of dirs) {

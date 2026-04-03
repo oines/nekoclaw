@@ -21,6 +21,7 @@ describe("OutboundDispatchService path rebasing", () => {
 		externalConversationId: "123",
 		chatKind: "dm",
 		sessionKey: "agent:test-agent:telegram:direct:123",
+		resetGeneration: 0,
 		status: "active",
 		createdAt: "",
 		updatedAt: "",

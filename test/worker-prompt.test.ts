@@ -3,7 +3,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildAppendPrompt, collectPromptImages } from "../src/runtime/worker.js";
-import type { WorkerPayload } from "../src/types.js";
+import type { SessionCronRecord, WorkerPayload } from "../src/types.js";
+
+const sessionCrons: SessionCronRecord[] = [
+	{
+		cronId: "cron-1",
+		agentId: "agent-1",
+		sessionRecordId: "session-1",
+		sessionKey: "agent:test-agent:telegram:group:1",
+		channelType: "telegram",
+		chatKind: "group",
+		externalConversationId: "1",
+		status: "active",
+		scheduleKind: "daily",
+		message: "daily reminder",
+		timezone: "Asia/Shanghai",
+		hour: 7,
+		minute: 0,
+		nextRunAt: "2026-03-29T23:00:00.000Z",
+		createdAt: "2026-03-29T00:00:00.000Z",
+		updatedAt: "2026-03-29T00:00:00.000Z",
+		createdFromResetGeneration: 0,
+	},
+];
 
 function createPayload(channelType: "telegram" | "napcat"): WorkerPayload {
 	return {
@@ -42,6 +64,7 @@ function createPayload(channelType: "telegram" | "napcat"): WorkerPayload {
 			channelType,
 			externalConversationId: "1",
 			chatKind: "group",
+			resetGeneration: 0,
 			status: "active",
 			createdAt: "2026-03-29T00:00:00.000Z",
 			updatedAt: "2026-03-29T00:00:00.000Z",
@@ -54,14 +77,16 @@ function createPayload(channelType: "telegram" | "napcat"): WorkerPayload {
 			delete: true,
 			typing: channelType === "telegram",
 		},
-			runtimeDirectory: {
-				contacts: [],
-				groups: [],
-				groupMembers: {},
-				availableChannels: [channelType === "napcat" ? "qq" : "telegram"],
-			},
-		};
-	}
+		runtimeDirectory: {
+			contacts: [],
+			groups: [],
+			groupMembers: {},
+			availableChannels: [channelType === "napcat" ? "qq" : "telegram"],
+		},
+		serverTimezone: "Asia/Shanghai",
+		sessionCrons,
+	};
+}
 
 describe("worker append prompt", () => {
 	it("includes matched telegram handles when present", () => {
@@ -77,6 +102,8 @@ describe("worker append prompt", () => {
 		expect(prompt).toContain("You may be addressed in this session as: @mock_bot");
 		expect(prompt).toContain("already matched as being addressed to you");
 		expect(prompt).toContain("Use the `send_message` tool");
+		expect(prompt).toContain("Use the `cron` tool");
+		expect(prompt).toContain("Asia/Shanghai");
 	});
 
 	it("includes the configured platform user id for napcat", () => {
@@ -109,6 +136,21 @@ describe("worker append prompt", () => {
 		expect(prompt).toContain("file path referenced in index.md");
 		expect(prompt).not.toContain("## Persona Selection Notes");
 		expect(prompt).not.toContain("## Selected Persona Memories");
+	});
+
+	it("mentions scheduled reminder context when present", () => {
+		const payload: WorkerPayload = {
+			...createPayload("telegram"),
+			scheduledReminder: {
+				cronId: "cron-1",
+				message: "wake me up",
+				timezone: "Asia/Shanghai",
+				scheduledFor: "2026-03-29T23:00:00.000Z",
+			},
+		};
+
+		const prompt = buildAppendPrompt(payload, "", "");
+		expect(prompt).toContain("Server local timezone");
 	});
 
 	it("collects hydrated image attachments as multimodal input", () => {

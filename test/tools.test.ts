@@ -4,6 +4,7 @@ import type {
 	ChannelToolAction,
 	InboundMessageEvent,
 	RuntimeDirectorySnapshot,
+	SessionCronRecord,
 	SessionRecord,
 } from "../src/types.js";
 
@@ -14,6 +15,7 @@ const session: SessionRecord = {
 	externalConversationId: "123",
 	chatKind: "dm",
 	sessionKey: "agent:cat-agent:telegram:direct:123",
+	resetGeneration: 0,
 	status: "active",
 	createdAt: "2026-03-29T00:00:00.000Z",
 	updatedAt: "2026-03-29T00:00:00.000Z",
@@ -77,10 +79,33 @@ const runtimeDirectory: RuntimeDirectorySnapshot = {
 		availableChannels: ["qq", "telegram"],
 };
 
+const sessionCrons: SessionCronRecord[] = [
+	{
+		cronId: "cron-1",
+		agentId: "agent-1",
+		sessionRecordId: "chat-1",
+		sessionKey: session.sessionKey,
+		channelType: "telegram",
+		chatKind: "dm",
+		externalConversationId: "123",
+		status: "active",
+		scheduleKind: "daily",
+		message: "send the report",
+		timezone: "Asia/Shanghai",
+		hour: 7,
+		minute: 0,
+		nextRunAt: "2026-03-30T23:00:00.000Z",
+		createdAt: "2026-03-29T00:00:00.000Z",
+		updatedAt: "2026-03-29T00:00:00.000Z",
+		createdFromResetGeneration: 0,
+	},
+];
+
 function createContext(input: {
 	actions?: ChannelToolAction[];
 	chatKind?: "dm" | "group";
 	isExplicitlyAddressed?: boolean;
+	sessionCronList?: SessionCronRecord[];
 } = {}) {
 	const actions = input.actions ?? [];
 	const chatKind = input.chatKind ?? "dm";
@@ -104,6 +129,8 @@ function createContext(input: {
 			typing: true,
 		},
 		runtimeDirectory,
+		serverTimezone: "Asia/Shanghai",
+		sessionCrons: input.sessionCronList ?? sessionCrons,
 		isExplicitlyAddressed: input.isExplicitlyAddressed ?? false,
 		recordAction: (action) => {
 			actions.push(action);
@@ -125,6 +152,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"cron",
 			"no_reply",
 		]);
 		expect(composition.customTools.map((tool) => tool.name)).toEqual([
@@ -135,6 +163,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"cron",
 			"no_reply",
 		]);
 
@@ -229,6 +258,50 @@ describe("tool composition", () => {
 			oversizedThresholdChars: 8_000,
 			toolResultBudgetChars: 12_000,
 		});
+		expect(summary.timezone).toBe("Asia/Shanghai");
+		expect(summary.activeCronCount).toBe(1);
+	});
+
+	it("lists current-session crons and records create/cancel actions", async () => {
+		const actions: ChannelToolAction[] = [];
+		const composition = createContext({ actions, sessionCronList: sessionCrons });
+		const cronTool = composition.customTools.find((tool) => tool.name === "cron");
+
+		const listResult = await cronTool?.execute("tool-cron-list", { action: "list" }, undefined, undefined, undefined as never);
+		await cronTool?.execute(
+			"tool-cron-create",
+			{
+				action: "create",
+				scheduleKind: "daily",
+				message: "daily standup",
+				hour: 7,
+				minute: 30,
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		await cronTool?.execute(
+			"tool-cron-cancel",
+			{ action: "cancel", cronId: "cron-1" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+
+		expect((listResult?.details as { crons: SessionCronRecord[] }).crons).toEqual(sessionCrons);
+		expect(actions[0]).toMatchObject({
+			kind: "cron_create",
+			scheduleKind: "daily",
+			message: "daily standup",
+			timezone: "Asia/Shanghai",
+			hour: 7,
+			minute: 30,
+		});
+		expect(actions[1]).toEqual({
+			kind: "cron_cancel",
+			cronId: "cron-1",
+		});
 	});
 
 	it("records a targeted proactive message separately from current-session message actions", async () => {
@@ -298,6 +371,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"cron",
 		]);
 		expect(composition.customTools.map((tool) => tool.name)).toEqual([
 			"message",
@@ -307,6 +381,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"cron",
 		]);
 	});
 
@@ -321,6 +396,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"cron",
 			"no_reply",
 		]);
 		expect(composition.customTools.map((tool) => tool.name)).toEqual([
@@ -331,6 +407,7 @@ describe("tool composition", () => {
 			"get_contact_detail",
 			"send_message",
 			"session_status",
+			"cron",
 			"no_reply",
 		]);
 	});

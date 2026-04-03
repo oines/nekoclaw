@@ -83,6 +83,7 @@ export interface SessionConfig {
 	threadId?: string;
 	lastRoute?: SessionLastRoute;
 	modelOverride?: SessionModelOverride;
+	resetGeneration: number;
 	status: "active" | "removed";
 	pairedAt: string;
 	updatedAt: string;
@@ -148,9 +149,34 @@ export interface SessionRecord {
 	chatTitle?: string;
 	lastRoute?: SessionLastRoute;
 	modelOverride?: SessionModelOverride;
+	resetGeneration: number;
 	status: "active" | "removed";
 	createdAt: string;
 	updatedAt: string;
+}
+
+export interface SessionCronRecord {
+	cronId: string;
+	agentId: string;
+	sessionRecordId: string;
+	sessionKey: string;
+	channelType: ChannelType;
+	chatKind: ChatKind;
+	externalConversationId: string;
+	threadId?: string;
+	chatTitle?: string;
+	status: "active" | "canceled" | "invalidated" | "completed";
+	scheduleKind: "once" | "daily";
+	message: string;
+	timezone: string;
+	runAtLocal?: string;
+	hour?: number;
+	minute?: number;
+	nextRunAt: string;
+	lastTriggeredAt?: string;
+	createdAt: string;
+	updatedAt: string;
+	createdFromResetGeneration: number;
 }
 
 export interface PairRequest {
@@ -369,6 +395,8 @@ export interface ChannelToolContext {
 	event: InboundMessageEvent;
 	capabilities: ChannelCapabilities;
 	runtimeDirectory: RuntimeDirectorySnapshot;
+	serverTimezone: string;
+	sessionCrons: SessionCronRecord[];
 	isExplicitlyAddressed?: boolean;
 	recordAction: (action: ChannelToolAction) => void;
 }
@@ -427,16 +455,36 @@ export type ChannelToolAction =
 	  }
 	| {
 			kind: "no_reply";
+	  }
+	| {
+			kind: "cron_create";
+			cronId: string;
+			scheduleKind: SessionCronRecord["scheduleKind"];
+			message: string;
+			timezone?: string;
+			runAtLocal?: string;
+			hour?: number;
+			minute?: number;
+	  }
+	| {
+			kind: "cron_cancel";
+			cronId: string;
 	  };
 
 export interface RunJob {
 	jobId: string;
 	agentId: string;
-	kind: "inbound";
+	kind: "inbound" | "scheduled";
 	sessionRecordId: string;
 	sessionKey: string;
 	createdAt: string;
 	event: InboundMessageEvent;
+	scheduledReminder?: {
+		cronId: string;
+		message: string;
+		timezone: string;
+		scheduledFor: string;
+	};
 }
 
 export interface QueueEvent {
@@ -490,6 +538,9 @@ export interface WorkerPayload {
 	capabilities: ChannelCapabilities;
 	runtimeDirectory: RuntimeDirectorySnapshot;
 	personaContext?: PreparedPersonaContext;
+	scheduledReminder?: RunJob["scheduledReminder"];
+	serverTimezone: string;
+	sessionCrons: SessionCronRecord[];
 	selfIdentity?: {
 		telegramHandles?: string[];
 		platformUserId?: string;

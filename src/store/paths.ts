@@ -2,6 +2,7 @@ import { join } from "node:path";
 import {
 	NEKOCLAW_RUNTIME_AUDIT_DIR,
 	NEKOCLAW_RUNTIME_CONTROL_DIR,
+	NEKOCLAW_RUNTIME_CRONS_DIR,
 	NEKOCLAW_RUNTIME_PAIRS_DIR,
 	NEKOCLAW_RUNTIME_QUEUES_DIR,
 	NEKOCLAW_RUNTIME_STATES_DIR,
@@ -107,6 +108,14 @@ export class StorePaths {
 
 	getRuntimeControlPath(requestId: string): string {
 		return join(NEKOCLAW_RUNTIME_CONTROL_DIR, `${requestId}.json`);
+	}
+
+	getCronsDir(): string {
+		return NEKOCLAW_RUNTIME_CRONS_DIR;
+	}
+
+	getCronPath(cronId: string): string {
+		return join(NEKOCLAW_RUNTIME_CRONS_DIR, `${cronId}.json`);
 	}
 
 	getLegacyRuntimeModelsPath(slug: string): string {
