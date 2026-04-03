@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
@@ -28,10 +28,10 @@ const FORMATION_MIN_OBSERVATION_LINES = 50;
 const FORMATION_MAX_WAIT_MS = 30 * 60 * 1_000;
 const FORMATION_MAX_RETRIES = 3;
 const DREAM_INTERVAL_MS = 6 * 60 * 60 * 1_000;
-const DREAM_DOC_EXCERPT_TOKEN_BUDGET = 220;
-const DREAM_OBSERVATION_EXCERPT_TOKEN_BUDGET = 180;
 const MAINTENANCE_TIMEOUT_MS = 120_000;
 const MANIFEST_TEXT_MAX_CHARS = 220;
+const MANIFEST_SCAN_MAX_FILES = 200;
+const MANIFEST_SCAN_MAX_BYTES = 8 * 1024;
 
 const maintenanceLocks = new Map<string, Promise<void>>();
 const backlogSweepQueued = new Set<string>();
@@ -39,6 +39,14 @@ const dreamQueued = new Set<string>();
 const dreamSkipAuditCache = new Map<string, string>();
 
 interface PersonaMemoryManifestEntry {
+	path: string;
+	kind: "people" | "scene";
+	title: string;
+	description: string;
+	mtimeMs: number;
+}
+
+interface ParsedPersonaMemoryFile {
 	path: string;
 	kind: "people" | "scene";
 	title: string;
@@ -61,28 +69,19 @@ interface DreamState {
 	lastError?: string;
 }
 
-interface DreamCorpusEntry {
-	path: string;
-	content: string;
-	excerpt: string;
-	mtimeMs: number;
-	sizeBytes: number;
-}
-
 interface DreamObservationEntry {
 	path: string;
-	content: string;
-	excerpt: string;
 	lineCount: number;
 	mtimeMs: number;
-	sizeBytes: number;
 }
 
 interface DreamCorpusSnapshot {
-	indexMarkdown: string;
-	people: DreamCorpusEntry[];
-	scenes: DreamCorpusEntry[];
+	indexPresent: boolean;
+	indexMtimeMs: number;
+	indexSizeBytes: number;
+	manifest: PersonaMemoryManifestEntry[];
 	observations: DreamObservationEntry[];
+	memoryManifestText: string;
 	corpusSignature: string;
 }
 
@@ -333,7 +332,7 @@ function deriveLegacyDescription(body: string): string {
 	return trimManifestText([start, continuation].filter(Boolean).join(" "));
 }
 
-function parsePersonaMemoryManifestEntry(relativePath: string, rawContent: string): PersonaMemoryManifestEntry {
+function parsePersonaMemoryFile(relativePath: string, rawContent: string): ParsedPersonaMemoryFile {
 	const { frontmatter, body, hasFrontmatter } = extractFrontmatterBlock(rawContent);
 	const bodyContent = body.trim();
 	return {
@@ -351,7 +350,7 @@ function escapeFrontmatterValue(value: string): string {
 }
 
 function ensureCanonicalPersonaMemoryContent(relativePath: string, rawContent: string): string {
-	const entry = parsePersonaMemoryManifestEntry(relativePath, rawContent);
+	const entry = parsePersonaMemoryFile(relativePath, rawContent);
 	if (entry.hasFrontmatter) {
 		return rawContent;
 	}
@@ -364,6 +363,29 @@ function ensureCanonicalPersonaMemoryContent(relativePath: string, rawContent: s
 		"",
 		body,
 	].join("\n").trimEnd() + "\n";
+}
+
+function readFileHeaderWindow(path: string, maxBytes = MANIFEST_SCAN_MAX_BYTES): string {
+	const fd = openSync(path, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(maxBytes);
+		const bytesRead = readSync(fd, buffer, 0, maxBytes, 0);
+		return buffer.subarray(0, bytesRead).toString("utf-8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function formatPersonaMemoryManifest(entries: PersonaMemoryManifestEntry[]): string {
+	if (entries.length === 0) {
+		return "(none)";
+	}
+	return entries
+		.map(
+			(entry) =>
+				`- [${entry.kind}] ${entry.title || "(untitled)"} | ${entry.path} (${new Date(entry.mtimeMs).toISOString()}): ${entry.description || "(no description)"}`,
+		)
+		.join("\n");
 }
 
 function formatObservationLine(event: InboundMessageEvent): string {
@@ -503,9 +525,8 @@ export class PersonaMemoryService {
 		}
 		const snapshot = this.buildDreamCorpusSnapshot(agent.slug);
 		if (
-			snapshot.indexMarkdown.trim().length === 0 &&
-			snapshot.people.length === 0 &&
-			snapshot.scenes.length === 0 &&
+			snapshot.indexSizeBytes === 0 &&
+			snapshot.manifest.length === 0 &&
 			snapshot.observations.length === 0
 		) {
 			this.auditDreamSkip(agent, "no_memory_files", {});
@@ -519,8 +540,8 @@ export class PersonaMemoryService {
 		dreamSkipAuditCache.delete(agent.agentId);
 		this.store.audit(agent.agentId, "persona.dream_queued", {
 			corpusSignature: snapshot.corpusSignature,
-			peopleFiles: snapshot.people.length,
-			sceneFiles: snapshot.scenes.length,
+			peopleFiles: snapshot.manifest.filter((entry) => entry.kind === "people").length,
+			sceneFiles: snapshot.manifest.filter((entry) => entry.kind === "scene").length,
 			observationFiles: snapshot.observations.length,
 		});
 		this.enqueueMaintenance(agent.agentId, async () => {
@@ -599,37 +620,26 @@ export class PersonaMemoryService {
 	private buildDreamCorpusSnapshot(slug: string): DreamCorpusSnapshot {
 		this.ensurePersonaLayout(slug);
 		const personaDir = this.store.getPersonaDir(slug);
-		const people = listMarkdownFiles(this.store.getPersonaPeopleDir(slug), personaDir).map((path) => this.readDreamCorpusEntry(personaDir, path));
-		const scenes = listMarkdownFiles(this.store.getPersonaScenesDir(slug), personaDir).map((path) => this.readDreamCorpusEntry(personaDir, path));
+		const manifest = this.scanPersonaMemoryManifest(slug);
 		const observations = listFilesWithExtension(this.store.getPersonaObservationsDir(slug), personaDir, ".log").map((path) =>
 			this.readDreamObservationEntry(personaDir, path),
 		);
-		const indexMarkdown = readTextFile(this.store.getPersonaIndexPath(slug), "");
+		const indexPath = this.store.getPersonaIndexPath(slug);
+		const indexPresent = existsSync(indexPath);
+		const indexStats = indexPresent ? statSync(indexPath) : undefined;
 		const signatureSeed = [
-			`index:${indexMarkdown}`,
-			...people.map((entry) => `${entry.path}:${entry.content}`),
-			...scenes.map((entry) => `${entry.path}:${entry.content}`),
-			...observations.map((entry) => `${entry.path}:${entry.content}`),
+			`index:index.md:${indexStats?.mtimeMs ?? 0}`,
+			...manifest.map((entry) => `memory:${entry.path}:${entry.mtimeMs}`),
+			...observations.map((entry) => `observation:${entry.path}:${entry.mtimeMs}:${entry.lineCount}`),
 		].join("\n\n");
 		return {
-			indexMarkdown,
-			people,
-			scenes,
+			indexPresent,
+			indexMtimeMs: indexStats?.mtimeMs ?? 0,
+			indexSizeBytes: indexStats?.size ?? 0,
+			manifest,
 			observations,
+			memoryManifestText: formatPersonaMemoryManifest(manifest),
 			corpusSignature: createHash("sha256").update(signatureSeed).digest("hex"),
-		};
-	}
-
-	private readDreamCorpusEntry(personaDir: string, relativePath: string): DreamCorpusEntry {
-		const absolutePath = safeJoinPersonaPath(personaDir, relativePath);
-		const content = readTextFile(absolutePath, "");
-		const stats = statSync(absolutePath);
-		return {
-			path: relativePath,
-			content,
-			excerpt: trimToTokenBudget(content, DREAM_DOC_EXCERPT_TOKEN_BUDGET),
-			mtimeMs: stats.mtimeMs,
-			sizeBytes: stats.size,
 		};
 	}
 
@@ -643,12 +653,33 @@ export class PersonaMemoryService {
 			.filter((line) => line.length > 0);
 		return {
 			path: relativePath,
-			content,
-			excerpt: takeTailLinesWithinBudget(content, 24, DREAM_OBSERVATION_EXCERPT_TOKEN_BUDGET),
 			lineCount: lines.length,
 			mtimeMs: stats.mtimeMs,
-			sizeBytes: stats.size,
 		};
+	}
+
+	private scanPersonaMemoryManifest(slug: string): PersonaMemoryManifestEntry[] {
+		this.ensurePersonaLayout(slug);
+		const personaDir = this.store.getPersonaDir(slug);
+		const paths = [
+			...listMarkdownFiles(this.store.getPersonaPeopleDir(slug), personaDir),
+			...listMarkdownFiles(this.store.getPersonaScenesDir(slug), personaDir),
+		];
+		return paths
+			.map((relativePath) => {
+				const absolutePath = safeJoinPersonaPath(personaDir, relativePath);
+				const parsed = parsePersonaMemoryFile(relativePath, readFileHeaderWindow(absolutePath));
+				const stats = statSync(absolutePath);
+				return {
+					path: parsed.path,
+					kind: parsed.kind,
+					title: parsed.title,
+					description: parsed.description,
+					mtimeMs: stats.mtimeMs,
+				} satisfies PersonaMemoryManifestEntry;
+			})
+			.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))
+			.slice(0, MANIFEST_SCAN_MAX_FILES);
 	}
 
 	private auditDreamSkip(agent: AgentSpec, reason: string, details: Record<string, unknown>): void {
@@ -956,6 +987,10 @@ export class PersonaMemoryService {
 						"- Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
 						"- Do not delete files.",
 						"- Preserve corrections, identity links, uncertainty, and whether you observed or participated.",
+						"",
+						"Memory files manifest:",
+						this.buildDreamCorpusSnapshot(input.agent.slug).memoryManifestText,
+						"",
 						"- When you finish, call persona_finalize with the number of observation lines from this scene log that were fully incorporated.",
 					].join("\n"),
 				});
@@ -991,9 +1026,8 @@ export class PersonaMemoryService {
 		this.clearDreamSkipAudit(agent.agentId);
 		const snapshot = this.buildDreamCorpusSnapshot(agent.slug);
 		if (
-			snapshot.indexMarkdown.trim().length === 0 &&
-			snapshot.people.length === 0 &&
-			snapshot.scenes.length === 0 &&
+			snapshot.indexSizeBytes === 0 &&
+			snapshot.manifest.length === 0 &&
 			snapshot.observations.length === 0
 		) {
 			this.auditDreamSkip(agent, "no_memory_files", {});
@@ -1007,8 +1041,8 @@ export class PersonaMemoryService {
 		});
 		this.store.audit(agent.agentId, "persona.dream_started", {
 			corpusSignature: snapshot.corpusSignature,
-			peopleFiles: snapshot.people.length,
-			sceneFiles: snapshot.scenes.length,
+			peopleFiles: snapshot.manifest.filter((entry) => entry.kind === "people").length,
+			sceneFiles: snapshot.manifest.filter((entry) => entry.kind === "scene").length,
 			observationFiles: snapshot.observations.length,
 		});
 		try {
@@ -1035,10 +1069,13 @@ export class PersonaMemoryService {
 						"- Never invent facts and never modify observations directly.",
 						"",
 						"Current corpus snapshot:",
-						`- index.md present: ${snapshot.indexMarkdown.trim().length > 0 ? "yes" : "no"}`,
-						`- people files: ${snapshot.people.length}`,
-						`- scene files: ${snapshot.scenes.length}`,
+						`- index.md present: ${snapshot.indexSizeBytes > 0 ? "yes" : "no"}`,
+						`- people files: ${snapshot.manifest.filter((entry) => entry.kind === "people").length}`,
+						`- scene files: ${snapshot.manifest.filter((entry) => entry.kind === "scene").length}`,
 						`- observation files: ${snapshot.observations.length}`,
+						"",
+						"Memory files manifest:",
+						snapshot.memoryManifestText,
 						"",
 						"Call persona_finalize exactly once when you are done. Dream must not consume observations, so finalize with consumeObservationLines=0.",
 					].join("\n"),
@@ -1110,8 +1147,12 @@ export class PersonaMemoryService {
 						"Any people/scenes file you touch should end with YAML frontmatter plus natural-language Markdown body.",
 						"Keep every index.md person and scene entry path-bearing so the worker can read the detailed file later.",
 						"Preserve corrections, identity links, uncertainty, and whether the bot was only observing.",
-							`Primary observation file: observations/${sceneRef}.log`,
-							"When finished, call persona_finalize with how many observation lines were fully incorporated.",
+						`Primary observation file: observations/${sceneRef}.log`,
+						"",
+						"Memory files manifest:",
+						this.buildDreamCorpusSnapshot(agent.slug).memoryManifestText,
+						"",
+						"When finished, call persona_finalize with how many observation lines were fully incorporated.",
 						].join("\n"),
 					});
 					this.syncMaintenanceClone(agent.slug, clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: false });

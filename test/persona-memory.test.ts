@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -219,6 +219,154 @@ describe("persona memory service", () => {
 		expect(completeMock).not.toHaveBeenCalled();
 	});
 
+	it("scans persona memory manifest from frontmatter and legacy content, sorted by mtime", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "manifest-scan-cat" });
+		const personaMemory = new PersonaMemoryService(store);
+		const legacyPath = join(store.getPersonaScenesDir(agent.slug), "legacy-scene.md");
+		const frontmatterPath = join(store.getPersonaPeopleDir(agent.slug), "alice.md");
+
+		writeFileSync(
+			frontmatterPath,
+			[
+				"---",
+				"title: \"Alice\"",
+				"description: \"Long-time friend who loves photography.\"",
+				"---",
+				"",
+				"Alice likes photography.",
+			].join("\n"),
+		);
+		writeFileSync(
+			legacyPath,
+			[
+				"# TIAL Members",
+				"",
+				"- People casually chat about projects and day-to-day life.",
+			].join("\n"),
+		);
+		utimesSync(legacyPath, new Date("2026-04-01T00:00:00.000Z"), new Date("2026-04-01T00:00:00.000Z"));
+		utimesSync(frontmatterPath, new Date("2026-04-02T00:00:00.000Z"), new Date("2026-04-02T00:00:00.000Z"));
+
+		const manifest = (personaMemory as any).scanPersonaMemoryManifest(agent.slug) as Array<{
+			path: string;
+			kind: string;
+			title: string;
+			description: string;
+			mtimeMs: number;
+		}>;
+
+		expect(manifest).toHaveLength(2);
+		expect(manifest[0]?.path).toBe("memory/people/alice.md");
+		expect(manifest[0]?.title).toBe("Alice");
+		expect(manifest[0]?.description).toBe("Long-time friend who loves photography.");
+		expect(manifest[1]?.path).toBe("memory/scenes/legacy-scene.md");
+		expect(manifest[1]?.title).toBe("TIAL Members");
+		expect(manifest[1]?.description).toContain("People casually chat about projects");
+	});
+
+	it("formats persona memory manifest as maintenance-facing text lines", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "manifest-format-cat" });
+		const personaMemory = new PersonaMemoryService(store);
+
+		writeFileSync(
+			join(store.getPersonaPeopleDir(agent.slug), "alice.md"),
+			[
+				"---",
+				"title: \"Alice\"",
+				"description: \"Long-time friend who loves photography.\"",
+				"---",
+				"",
+				"Alice likes photography.",
+			].join("\n"),
+		);
+
+		const snapshot = (personaMemory as any).buildDreamCorpusSnapshot(agent.slug) as { memoryManifestText: string };
+
+		expect(snapshot.memoryManifestText).toContain("- [people] Alice | memory/people/alice.md (");
+		expect(snapshot.memoryManifestText).toContain("Long-time friend who loves photography.");
+	});
+
+	it("caps persona memory manifest to the 200 most recent files", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "manifest-cap-cat" });
+		const personaMemory = new PersonaMemoryService(store);
+		for (let index = 0; index < 205; index += 1) {
+			const path = join(store.getPersonaPeopleDir(agent.slug), `person-${String(index).padStart(3, "0")}.md`);
+			writeFileSync(
+				path,
+				[
+					"---",
+					`title: \"Person ${index}\"`,
+					`description: \"Person ${index} description.\"`,
+					"---",
+					"",
+					`Person ${index}.`,
+				].join("\n"),
+			);
+			const when = new Date(`2026-04-01T00:${String(index % 60).padStart(2, "0")}:00.000Z`);
+			when.setUTCDate(1 + Math.floor(index / 60));
+			utimesSync(path, when, when);
+		}
+
+		const manifest = (personaMemory as any).scanPersonaMemoryManifest(agent.slug) as Array<{ path: string }>;
+
+		expect(manifest).toHaveLength(200);
+		expect(manifest.some((entry) => entry.path === "memory/people/person-204.md")).toBe(true);
+		expect(manifest.some((entry) => entry.path === "memory/people/person-000.md")).toBe(false);
+	});
+
+	it("builds dream corpus signatures from mtimes instead of full memory content", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "dream-signature-cat" });
+		const personaMemory = new PersonaMemoryService(store);
+		const memoryPath = join(store.getPersonaPeopleDir(agent.slug), "stable.md");
+		const fixedTime = new Date("2026-04-01T00:00:00.000Z");
+
+		writeFileSync(
+			memoryPath,
+			[
+				"---",
+				"title: \"Stable Person\"",
+				"description: \"First version.\"",
+				"---",
+				"",
+				"First body.",
+			].join("\n"),
+		);
+		utimesSync(memoryPath, fixedTime, fixedTime);
+		const first = (personaMemory as any).buildDreamCorpusSnapshot(agent.slug) as { corpusSignature: string };
+
+		writeFileSync(
+			memoryPath,
+			[
+				"---",
+				"title: \"Stable Person\"",
+				"description: \"Second version with different body text.\"",
+				"---",
+				"",
+				"Completely different body.",
+			].join("\n"),
+		);
+		utimesSync(memoryPath, fixedTime, fixedTime);
+		const second = (personaMemory as any).buildDreamCorpusSnapshot(agent.slug) as { corpusSignature: string };
+
+		expect(second.corpusSignature).toBe(first.corpusSignature);
+	});
+
 	it("does not run formation before 50 observations or 30 minutes have elapsed", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
@@ -298,7 +446,9 @@ describe("persona memory service", () => {
 			personaMemory.recordInbound(agent.agentId, session, event);
 		}
 		const context = await personaMemory.buildPreparedContext(agent, session, event);
+		let formationPrompt = "";
 		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+			formationPrompt = (input as { prompt?: string }).prompt ?? "";
 			writeFileSync(
 				join(input.tempPersonaDir, "index.md"),
 				"## 我认识的人和场景\n- 张三：GPU 租赁平台 → memory/people/telegram-111.md\n- telegram-dm-111：近期互动 → memory/scenes/telegram-dm-111.md\n",
@@ -332,6 +482,7 @@ describe("persona memory service", () => {
 		expect(readFileSync(join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"), "utf-8")).toContain("title: \"张三\"");
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-dm-111.md"), "utf-8")).toContain("description:");
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-dm-111.md"), "utf-8")).toContain("张三");
+		expect(formationPrompt).toContain("Memory files manifest:");
 		expect(() => readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-dm-111"), "utf-8")).toThrow();
 	});
 
@@ -573,7 +724,9 @@ describe("persona memory service", () => {
 				occurredAt: "2026-04-01T00:00:00.000Z",
 			}),
 		);
+		let dreamPrompt = "";
 		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: { tempPersonaDir: string }) => {
+			dreamPrompt = (input as { prompt?: string }).prompt ?? "";
 			writeFileSync(
 				join(input.tempPersonaDir, "index.md"),
 				"## 我认识的人\n- 已知人物：更新后 → memory/people/known.md\n",
@@ -596,6 +749,7 @@ describe("persona memory service", () => {
 		expect(readFileSync(join(store.getPersonaPeopleDir(agent.slug), "known.md"), "utf-8")).toContain("更新后的 Dream 记忆");
 		expect(readFileSync(join(store.getPersonaPeopleDir(agent.slug), "known.md"), "utf-8")).toContain("description:");
 		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toContain("这条 observation 应该继续保留");
+		expect(dreamPrompt).toContain("Memory files manifest:");
 		const audits = store.getAuditEntries(agent.agentId);
 		expect(audits.some((entry) => entry.kind === "persona.dream_started")).toBe(true);
 		expect(audits.some((entry) => entry.kind === "persona.dream_applied")).toBe(true);
