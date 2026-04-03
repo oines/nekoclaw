@@ -212,6 +212,18 @@ describe("nekoclaw handlers", () => {
 		expect(spawnMock).toHaveBeenCalledTimes(1);
 	});
 
+	it("treats napcat handshake fatals with socket-hang-up stacks as recoverable runtime errors", async () => {
+		const { isRecoverableRuntimeError } = await import("../src/cli/handlers/runtime.js");
+		const error = new Error("Fatal! more info see: {}");
+		error.stack = `Error: Fatal! more info see: {}
+    at Client.connectHandler (onebot-client-next)
+    at emitErrorEvent (node:_http_client:109:11)
+    at ClientRequest.<anonymous>
+Caused by: socket hang up`;
+
+		expect(isRecoverableRuntimeError(error)).toBe(true);
+	});
+
 	it("enables an agent without starting the runtime or container", async () => {
 		const spawnMock = vi.fn();
 		vi.doMock("node:child_process", () => ({

@@ -8,6 +8,23 @@ import { JsonNekoclawStore } from "../../store/json-store.js";
 import type { AgentSpec } from "../../types.js";
 import { isRuntimeAlive } from "./shared.js";
 
+export function isRecoverableRuntimeError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+	const code = "code" in error ? String((error as { code?: unknown }).code) : "";
+	if (["ECONNRESET", "EPIPE", "ECONNREFUSED", "ETIMEDOUT"].includes(code)) {
+		return true;
+	}
+	const text = [error.message ?? "", error.stack ?? ""].join("\n");
+	return (
+		text.includes("socket hang up") ||
+		text.includes("WebSocket was closed") ||
+		text.includes("Fatal! more info see") ||
+		text.includes("NapCat connection lost")
+	);
+}
+
 async function waitForRuntimeControlCompletion(
 	store: JsonNekoclawStore,
 	requestId: string,
@@ -146,17 +163,6 @@ export async function runInternalRuntime(store: JsonNekoclawStore): Promise<void
 			pid: process.pid,
 			updatedAt: new Date().toISOString(),
 		});
-	};
-	const isRecoverableRuntimeError = (error: unknown): boolean => {
-		if (!(error instanceof Error)) {
-			return false;
-		}
-		const code = "code" in error ? String((error as { code?: unknown }).code) : "";
-		if (["ECONNRESET", "EPIPE", "ECONNREFUSED", "ETIMEDOUT"].includes(code)) {
-			return true;
-		}
-		const msg = error.message ?? "";
-		return msg.includes("socket hang up") || msg.includes("WebSocket was closed");
 	};
 	const fatalExit = (error: unknown) => {
 		if (exiting) {
