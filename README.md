@@ -78,18 +78,20 @@ agent 的上下文分五层，从"永远在"到"偶尔在"：
 
 **采集阶段**：群里的消息不管有没有 @ bot 都会被记一行到 observations 日志里。不调 LLM，不做任何理解，零成本。
 
-**整理阶段（formation）**：bot 回复发出后异步触发。LLM 从对话和旁观日志中提取值得记住的内容，和已有记忆对比，重写记忆文件和索引。不阻塞正常回复。按场景批量触发，控制成本。
+**整理阶段（Formation）**：当观察积压达到 50 行或最旧观察超过 30 分钟时异步触发。LLM 从对话和旁观日志中提取值得记住的内容，和已有记忆对比，重写记忆文件和索引。不阻塞正常回复。按场景批量触发，控制成本。
 
 ### Dream：全局记忆整理
 
-formation 是局部的——群 A 有新内容就整理群 A。Dream 是全局的——daemon 定期触发，审视所有记忆文件：
+Formation 是局部的——群 A 有新内容就整理群 A。Dream 是全局的——每 6 小时触发一次（且记忆语料库有变更时），审视所有记忆文件：
 
 - **跨场景关联**：小王在群 A 聊创业、群 B 聊招人，dream 把两件事关联到小王的档案里
 - **索引重整**：从全局审视 index.md，清理重复、过时、不一致的内容
 - **全局老化**：长期不活跃的人物记忆被压缩，活跃人物不受影响
 - **补漏**：发现在多个群被反复提到但还没建档的人物
 
-Dream 和 formation 共享同一个串行队列，不会并发写文件。
+Dream 和 Formation 共享同一个串行队列，不会并发写文件。
+
+**Memory Manifest**：Formation 和 Dream 执行时会自动扫描所有记忆文件，生成清单（包含路径、标题、描述、修改时间），帮助 agent 快速了解有哪些记忆可以读取。最多扫描 200 个文件。
 
 ### 认人与纠偏
 
@@ -103,7 +105,14 @@ Dream 和 formation 共享同一个串行队列，不会并发写文件。
 
 ### 记忆文件示例
 
+每个人物或场景记忆文件必须包含 YAML frontmatter（`title` 和 `description`），后接自然语言正文：
+
 ```markdown
+---
+title: 小王
+description: 创业者，GPU 租赁平台，毕业论文压力大
+---
+
 小王，最早在 TG 上认识的（tg:111），后来他自己说 QQ 号是 qq:222。
 
 在做一个 GPU 租赁平台的创业项目，经常找我聊技术问题。
@@ -221,6 +230,47 @@ nekoclaw session list / remove <agent>
 nekoclaw pair list
 nekoclaw pair accept --code <code>
 ```
+
+---
+
+## 📋 限制与注意事项
+
+- **记忆文件数量**：Memory manifest 最多扫描 200 个文件（people + scenes）
+- **Docker 依赖**：每个 agent 需要独立容器，确保 Docker 有足够资源
+- **Formation 触发**：观察积压 ≥ 50 行或最旧观察 > 30 分钟才触发，不是每次回复都触发
+- **Dream 间隔**：最短 6 小时触发一次，且记忆语料库必须有变更
+
+---
+
+## 🐛 故障排查
+
+### 查看日志
+
+```bash
+# Daemon 日志
+nekoclaw status
+
+# Agent 审计日志
+cat ~/.nekoclaw/runtime/audit/<agent-id>.jsonl | tail -20
+
+# 队列状态
+cat ~/.nekoclaw/runtime/queues/<agent-id>.jsonl
+```
+
+### 常见问题
+
+**Agent 不回复消息**
+- 检查 `nekoclaw status` 确认 daemon 运行中
+- 检查 channel 配置：`nekoclaw channel list <agent>`
+- 检查触发模式（群聊需要 @ 或配置为 `all`）
+
+**Formation/Dream 不执行**
+- 检查观察积压：`ls -la ~/.nekoclaw/workspaces/<slug>/.nekoclaw-persona/observations/`
+- 检查 Dream 状态：`cat ~/.nekoclaw/workspaces/<slug>/.nekoclaw-persona/control/dream.json`
+
+**Docker 容器问题**
+- 检查容器状态：`docker ps -a | grep nekoclaw`
+- 重启容器：`nekoclaw restart`
 
 ---
 

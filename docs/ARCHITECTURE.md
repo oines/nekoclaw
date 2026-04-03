@@ -230,6 +230,43 @@ no_reply          明确抑制默认回复
 
 **按需召回：** Agent 可在一轮对话中调用 `read(path)` 加载详细记忆文件。索引告诉它有哪些文件、各自包含什么。
 
+### Memory Manifest（记忆清单）
+
+**用途：** 为 Formation 和 Dream 提供记忆文件的结构化概览，避免逐个打开文件。
+
+**数据结构：**
+```typescript
+interface PersonaMemoryManifestEntry {
+  path: string              // 相对路径，如 "memory/people/alice.md"
+  kind: "people" | "scene"  // 文件类型
+  title: string             // 从 frontmatter 读取
+  description: string       // 从 frontmatter 读取
+  mtimeMs: number           // 文件修改时间
+}
+```
+
+**文本格式：**
+```
+- [people] Alice | memory/people/alice.md (2024-01-15T10:30:00.000Z): 老朋友，摄影爱好者
+- [scene] 技术讨论群 | memory/scenes/telegram-group-123.md (2024-01-14T15:20:00.000Z): 主要聊编程
+```
+
+**生成方式：**
+- 动态扫描 `memory/people/*.md` 和 `memory/scenes/*.md`
+- 读取每个文件的 frontmatter（title、description）
+- 按 mtimeMs 降序排序（最新的在前）
+- 限制最多 200 个文件
+
+**使用场景：**
+1. **Formation** — 了解有哪些记忆文件可以读取/编辑，决定要操作哪些
+2. **Dream** — 快速了解整个记忆语料库的结构，决定要读取/编辑/删除哪些文件
+3. **语料库签名** — 基于 manifest（path + mtimeMs）计算签名，判断是否需要触发 Dream
+
+**与 index.md 的区别：**
+- `index.md` 是给 Worker 看的"通讯录"（每次对话都注入）
+- Manifest 是给 Formation/Dream 看的"文件列表"（只在维护时注入）
+- `index.md` 由 Formation/Dream 手动维护，manifest 由系统自动扫描生成
+
 ### 观察日志
 
 场景中发生的一切的原始只追加记录：
@@ -251,6 +288,7 @@ no_reply          明确抑制默认回复
 - 本轮用户发的消息原文
 - agent 实际回复的内容
 - 该场景的完整观察日志（`observations/{sceneRef}.log`）
+- **Memory files manifest** — 所有 `memory/people/*.md` 和 `memory/scenes/*.md` 的清单（路径、标题、描述、修改时间）
 - 现有 `index.md` 和场景记忆文件（通过工具主动读取）
 
 **不会看到：** 完整会话历史、其他场景的观察、`SOUL.md`。Formation 是场景局部的。
@@ -268,7 +306,7 @@ no_reply          明确抑制默认回复
 1. 读取场景观察日志
 2. 将人格目录克隆到临时目录
 3. 启动维护 agent 会话，提供 read/edit/write 工具（无 delete）
-4. 注入上下文和操作指令
+4. 注入上下文（包括 manifest）和操作指令
 5. Agent 更新 `index.md` 和相关 `memory/people/*.md` / `memory/scenes/*.md`
 6. Agent 调用 `persona_finalize(consumeObservationLines: N)` 提交
 7. 将临时目录同步回实时人格目录
@@ -281,10 +319,11 @@ no_reply          明确抑制默认回复
 
 ### Dream（全局记忆整合）
 
-触发条件：记忆语料库已变更（所有文件的 SHA256 签名），且距上次完成超过 6 小时。
+触发条件：记忆语料库已变更（基于文件路径和 mtime 的签名），且距上次完成超过 6 小时。
 
 **注入的上下文（语料库快照）：**
 - `index.md` 完整内容
+- **Memory files manifest** — 所有 `memory/people/*.md` 和 `memory/scenes/*.md` 的清单（路径、标题、描述、修改时间），按修改时间降序排列
 - 所有 `memory/people/*.md` 文件（每个取前 220 token 摘录）
 - 所有 `memory/scenes/*.md` 文件（每个取前 220 token 摘录）
 - 所有 `observations/*.log` 文件（每个取尾部 180 token 摘录）
@@ -302,11 +341,11 @@ no_reply          明确抑制默认回复
 **提交方式：** 调用 `persona_finalize(consumeObservationLines: 0)`，不消费任何观察行。
 
 **算法：**
-1. 构建语料库快照：读取索引 + 所有人物/场景/观察文件的摘录
-2. 计算语料库签名
+1. 构建语料库快照：扫描生成 manifest + 读取索引 + 所有人物/场景/观察文件的摘录
+2. 计算语料库签名（基于 manifest 的 path + mtimeMs）
 3. 将人格目录克隆到临时目录
 4. 启动维护 agent 会话，提供 read/edit/write/delete 工具
-5. 注入语料库快照和操作指令
+5. 注入语料库快照（包括 manifest）和操作指令
 6. Agent 跨场景关联人物、重建 `index.md`、压缩/删除/创建记忆文件
 7. Agent 调用 `persona_finalize(consumeObservationLines: 0)` 提交
 8. 将临时目录同步回实时人格目录
@@ -487,3 +526,4 @@ Worker 通过 `WorkerPayload` 接收所需的一切，通过 `WorkerResult` 返�
 | `SESSION_KEEP_RECENT_TOKENS` | 20,000 | 近期消息历史预算 |
 | `SOFT_TRIM_THRESHOLD_CHARS` | 8,000 | 工具结果软裁剪阈值 |
 | `HARD_CLEAR_BUDGET_CHARS` | 12,000 | 工具结果总量硬清除阈值 |
+| `MANIFEST_SCAN_MAX_FILES` | 200 | Memory manifest 最多扫描的文件数 |
