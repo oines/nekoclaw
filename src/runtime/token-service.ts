@@ -1,11 +1,11 @@
 import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
+import { fetchModelCatalog } from "../model/catalog.js";
 import type { RuntimeModelsConfig } from "../model/model-types.js";
-import { fetchProxyModelCatalog, upsertRuntimeModelsConfig } from "../model/probe.js";
+import { upsertRuntimeModelsConfig } from "../model/probe.js";
 import { MODEL_ENV_MAP } from "../model/provider-key.js";
-import { resolveRuntimeModelLimits } from "../model/runtime-model-metadata.js";
 import type { JsonNekoclawStore } from "../store/json-store.js";
-import type { AgentSpec, ModelConfig, SessionRecord } from "../types.js";
+import type { AgentSpec, ModelApiFormat, ModelConfig, SessionRecord } from "../types.js";
 
 export interface TokenCountAvailable {
 	available: true;
@@ -28,7 +28,7 @@ export type TokenCountResult = TokenCountAvailable | TokenCountUnavailable;
 export interface ResolvedTokenModel {
 	provider: string;
 	modelId: string;
-	api?: string;
+	api?: ModelApiFormat;
 	baseUrl?: string;
 	contextWindow?: number;
 	maxTokens?: number;
@@ -87,15 +87,6 @@ export class TokenService {
 		const runtimeConfig = this.store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig | undefined;
 		const runtimeProvider = runtimeConfig?.providers?.[provider];
 		const runtimeEntry = runtimeProvider?.models?.find((entry) => entry.id === modelId);
-		const fallbackLimits = resolveRuntimeModelLimits({
-			config: runtimeConfig,
-			providerId: provider,
-			modelId,
-			api: resolved?.api ?? (modelConfig?.kind === "custom" && modelConfig.providerId === provider ? modelConfig.api : undefined),
-			baseUrl:
-				trimTrailingSlash(resolved?.baseUrl) ??
-				(modelConfig?.kind === "custom" && modelConfig.providerId === provider ? trimTrailingSlash(modelConfig.baseUrl) : undefined),
-		});
 		const apiKey =
 			modelConfig?.kind === "custom"
 				? this.store.getCustomModelApiKey(agent.agentId)
@@ -103,12 +94,13 @@ export class TokenService {
 		return {
 			provider,
 			modelId,
-			api: resolved?.api ?? (modelConfig?.kind === "custom" && modelConfig.providerId === provider ? modelConfig.api : undefined),
+			api: (resolved?.api as ModelApiFormat | undefined) ?? (modelConfig?.kind === "custom" && modelConfig.providerId === provider ? modelConfig.api : undefined),
 			baseUrl:
+				trimTrailingSlash(runtimeProvider?.baseUrl) ??
 				trimTrailingSlash(resolved?.baseUrl) ??
 				(modelConfig?.kind === "custom" && modelConfig.providerId === provider ? trimTrailingSlash(modelConfig.baseUrl) : undefined),
-			contextWindow: runtimeEntry?.contextWindow ?? resolved?.contextWindow ?? fallbackLimits?.contextWindow,
-			maxTokens: runtimeEntry?.maxTokens ?? (resolved as { maxTokens?: number } | undefined)?.maxTokens ?? fallbackLimits?.maxTokens,
+			contextWindow: runtimeEntry?.contextWindow,
+			maxTokens: runtimeEntry?.maxTokens,
 			apiKey,
 			hasPersistedContextWindow: typeof runtimeEntry?.contextWindow === "number" && runtimeEntry.contextWindow > 0,
 		};
@@ -173,7 +165,7 @@ export class TokenService {
 		resolved: ResolvedTokenModel,
 	): Promise<ResolvedTokenModel | undefined> {
 		const modelConfig = this.store.getModelConfig(agent.agentId);
-		if (!this.canRefreshCustomContextMetadata(modelConfig, resolved)) {
+		if (!modelConfig || !this.canRefreshContextMetadata(modelConfig, resolved)) {
 			return undefined;
 		}
 		const cacheKey = `${agent.agentId}|${resolved.provider}|${resolved.modelId}`;
@@ -189,14 +181,13 @@ export class TokenService {
 		}
 	}
 
-	private canRefreshCustomContextMetadata(
+	private canRefreshContextMetadata(
 		modelConfig: ModelConfig | undefined,
 		resolved: ResolvedTokenModel,
-	): modelConfig is Extract<ModelConfig, { kind: "custom" }> {
+	): boolean {
 		return Boolean(
-			modelConfig?.kind === "custom" &&
-			modelConfig.providerId === resolved.provider &&
-			resolved.api === "openai-completions" &&
+			(modelConfig?.kind === "custom" || modelConfig?.kind === "builtin") &&
+			resolved.api &&
 			resolved.baseUrl,
 		);
 	}
@@ -205,28 +196,40 @@ export class TokenService {
 		agent: Pick<AgentSpec, "agentId" | "slug" | "provider" | "modelId">,
 		_session: Pick<SessionRecord, "modelOverride"> | undefined,
 		resolved: ResolvedTokenModel,
-		modelConfig: Extract<ModelConfig, { kind: "custom" }>,
+		modelConfig: ModelConfig,
 	): Promise<ResolvedTokenModel | undefined> {
 		try {
-			const catalog = await fetchProxyModelCatalog(resolved.baseUrl!, resolved.apiKey);
+			const catalog = await fetchModelCatalog({
+				providerId: resolved.provider,
+				api: resolved.api!,
+				baseUrl: resolved.baseUrl!,
+				apiKey: resolved.apiKey,
+			});
 			const entry = catalog.find((candidate) => candidate.id === resolved.modelId);
-			if (!entry || (entry.contextWindow === undefined && entry.maxTokens === undefined && !entry.name)) {
+			if (
+				!entry ||
+				(entry.contextWindow === undefined &&
+					entry.maxTokens === undefined &&
+					(!entry.input || entry.input.length === 0) &&
+					!entry.name)
+			) {
 				return undefined;
 			}
 			const current = this.store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig | undefined;
 			const updated = upsertRuntimeModelsConfig(current, {
-				baseUrl: modelConfig.baseUrl,
-				api: modelConfig.api,
-				provider: modelConfig.providerId,
-				apiKeyEnv: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
+				baseUrl: resolved.baseUrl!,
+				api: resolved.api!,
+				provider: resolved.provider,
+				apiKeyEnv: modelConfig.kind === "custom" ? NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV : (MODEL_ENV_MAP[resolved.provider] ?? ""),
 				modelId: resolved.modelId,
 				name: entry.name,
+				input: entry.input,
 				contextWindow: entry.contextWindow,
 				maxTokens: entry.maxTokens,
 			});
 			this.store.writeRuntimeModelsConfig(agent.agentId, updated, {
 				source: "context-window-refresh",
-				providerId: modelConfig.providerId,
+				providerId: resolved.provider,
 				modelId: resolved.modelId,
 			});
 			return this.resolveEffectiveModel(agent, _session);

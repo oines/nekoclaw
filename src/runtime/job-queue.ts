@@ -1,7 +1,7 @@
 import { JsonNekoclawStore } from "../store/json-store.js";
 import type { ActiveRunState, JobExecutionContext, QueueEvent, QueueStatus, RunJob, WorkerResult } from "../types.js";
 import { nowIso } from "../store/helpers.js";
-import { QueueFullError } from "./errors.js";
+import { QueueFullError, SessionStoppedError, isSessionStoppedError } from "./errors.js";
 
 function toQueueEvent(type: QueueEvent["type"], job: RunJob, error?: string): QueueEvent {
 	return {
@@ -24,7 +24,11 @@ interface JobQueueHooks {
 	onRemoved?: (jobs: RunJob[]) => void;
 }
 
+type ActiveRunCancelMap = Map<string, AbortController>;
+
 export class JobQueueService {
+	private readonly activeRunCancelsByAgent = new Map<string, ActiveRunCancelMap>();
+
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly agentQueues: Map<string, SessionQueueMap>,
@@ -82,19 +86,25 @@ export class JobQueueService {
 		}
 		this.agentQueues.delete(agentId);
 		this.activeRunsByAgent.delete(agentId);
+		this.activeRunCancelsByAgent.delete(agentId);
 	}
 
-	stopSession(agentId: string, sessionRecordId: string): { removedQueuedCount: number; hadQueuedWork: boolean } {
+	stopSession(
+		agentId: string,
+		sessionRecordId: string,
+	): { removedQueuedCount: number; hadQueuedWork: boolean; interruptedActiveRun: boolean } {
 		const sessionQueues = this.agentQueues.get(agentId);
 		const queue = sessionQueues?.get(sessionRecordId);
-		if (!sessionQueues || !queue || queue.length === 0) {
-			return { removedQueuedCount: 0, hadQueuedWork: false };
-		}
 		const isActiveSession = this.getActiveRuns(agentId).has(sessionRecordId);
-		const removedQueuedCount = isActiveSession ? Math.max(0, queue.length - 1) : queue.length;
-		if (removedQueuedCount === 0) {
-			return { removedQueuedCount: 0, hadQueuedWork: false };
+		const interruptedActiveRun = this.abortActiveRun(agentId, sessionRecordId);
+		if (!sessionQueues || !queue || queue.length === 0) {
+			return {
+				removedQueuedCount: 0,
+				hadQueuedWork: interruptedActiveRun,
+				interruptedActiveRun,
+			};
 		}
+		const removedQueuedCount = isActiveSession ? Math.max(0, queue.length - 1) : queue.length;
 		const removedJobs = isActiveSession ? queue.slice(1) : [...queue];
 		if (isActiveSession) {
 			queue.splice(1);
@@ -104,13 +114,21 @@ export class JobQueueService {
 		if (removedJobs.length > 0) {
 			this.hooks.onRemoved?.(removedJobs);
 		}
+		if (!isActiveSession || queue.length === 0) {
+			sessionQueues.delete(sessionRecordId);
+		}
 		this.compactQueueLog(agentId, sessionQueues);
 		this.store.audit(agentId, "queue.stop_session", {
 			sessionRecordId,
 			removedQueuedCount,
 			running: isActiveSession,
+			interruptedActiveRun,
 		});
-		return { removedQueuedCount, hadQueuedWork: true };
+		return {
+			removedQueuedCount,
+			hadQueuedWork: interruptedActiveRun || removedQueuedCount > 0,
+			interruptedActiveRun,
+		};
 	}
 
 	compactQueueLog(agentId: string, sessionQueues = this.agentQueues.get(agentId) ?? new Map<string, RunJob[]>()): void {
@@ -198,13 +216,17 @@ export class JobQueueService {
 			const job = queue[0];
 			const executionContext: JobExecutionContext = {
 				allowPersonaPrefetchWait: this.shouldWaitForPersonaPrefetch(agentId, sessionRecordId, queue, sessionQueues),
+				signal: undefined,
 			};
+			const abortController = new AbortController();
+			executionContext.signal = abortController.signal;
 			const runState: ActiveRunState = {
 				sessionRecordId,
 				jobId: job.jobId,
 				startedAt: nowIso(),
 			};
 			activeRuns.set(sessionRecordId, runState);
+			this.getOrCreateActiveRunCancels(agentId).set(sessionRecordId, abortController);
 			this.store.appendQueueEvent(agentId, toQueueEvent("start", job));
 			this.syncRuntimeState(agentId);
 			try {
@@ -218,14 +240,24 @@ export class JobQueueService {
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				this.store.appendQueueEvent(agentId, toQueueEvent("fail", job, message));
-				this.store.updateAgent(agentId, { lastError: message });
-				this.store.audit(agentId, "queue.fail", {
-					jobId: job.jobId,
-					sessionRecordId: job.sessionRecordId,
-					error: message,
-				});
+				if (isSessionStoppedError(error)) {
+					this.store.appendQueueEvent(agentId, toQueueEvent("cancel", job, message));
+					this.store.audit(agentId, "queue.cancel", {
+						jobId: job.jobId,
+						sessionRecordId: job.sessionRecordId,
+						error: message,
+					});
+				} else {
+					this.store.appendQueueEvent(agentId, toQueueEvent("fail", job, message));
+					this.store.updateAgent(agentId, { lastError: message });
+					this.store.audit(agentId, "queue.fail", {
+						jobId: job.jobId,
+						sessionRecordId: job.sessionRecordId,
+						error: message,
+					});
+				}
 			} finally {
+				this.getOrCreateActiveRunCancels(agentId).delete(sessionRecordId);
 				this.hooks.onRemoved?.([job]);
 				queue.shift();
 				if (queue.length === 0) {
@@ -292,6 +324,33 @@ export class JobQueueService {
 		const created = new Map<string, ActiveRunState>();
 		this.activeRunsByAgent.set(agentId, created);
 		return created;
+	}
+
+	private getOrCreateActiveRunCancels(agentId: string): ActiveRunCancelMap {
+		const existing = this.activeRunCancelsByAgent.get(agentId);
+		if (existing) {
+			return existing;
+		}
+		const created = new Map<string, AbortController>();
+		this.activeRunCancelsByAgent.set(agentId, created);
+		return created;
+	}
+
+	private abortActiveRun(agentId: string, sessionRecordId: string): boolean {
+		const abortController = this.getOrCreateActiveRunCancels(agentId).get(sessionRecordId);
+		if (!abortController || abortController.signal.aborted) {
+			return false;
+		}
+		const activeRun = this.getActiveRuns(agentId).get(sessionRecordId);
+		abortController.abort(
+			new SessionStoppedError({
+				agentId,
+				sessionRecordId,
+				jobId: activeRun?.jobId,
+				message: "Session was stopped via /stop",
+			}),
+		);
+		return true;
 	}
 
 	private getTrackedJobCount(sessionQueues: SessionQueueMap): number {

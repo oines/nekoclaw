@@ -1,26 +1,29 @@
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { basename, dirname, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { NEKOCLAW_CONTAINER_CODE_DIR, NEKOCLAW_CONTAINER_WORKSPACE_DIR } from "../config.js";
 import type { AgentSpec } from "../types.js";
+import { SessionStoppedError } from "./errors.js";
 
 function getPackageRoot(): string {
 	return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 }
 
 export function getNodeModulesRoot(): string {
-	const require = createRequire(import.meta.url);
-	const resolvedEntry = require.resolve("chalk");
-	let current = dirname(resolvedEntry);
-	while (basename(current) !== "node_modules") {
+	const packageRoot = getPackageRoot();
+	let current = packageRoot;
+	while (true) {
+		const candidate = join(current, "node_modules");
+		if (existsSync(candidate)) {
+			return candidate;
+		}
 		const parent = dirname(current);
 		if (parent === current) {
 			throw new Error("Could not locate node_modules for nekoclaw worker runtime");
 		}
 		current = parent;
 	}
-	return current;
 }
 
 export function getRuntimeMountRoot(): string {
@@ -38,7 +41,7 @@ function getContainerWorkerEntrypoint(): string {
 function runCommand(
 	command: string,
 	args: string[],
-	options: { input?: string; timeoutMs?: number } = {},
+	options: { input?: string; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn(command, args, {
@@ -47,6 +50,8 @@ function runCommand(
 
 		let stdout = "";
 		let stderr = "";
+		let aborted = false;
+		let abortReason: unknown;
 
 		child.stdout.on("data", (chunk) => {
 			stdout += String(chunk);
@@ -66,6 +71,24 @@ function runCommand(
 						}, 5_000);
 					}, options.timeoutMs)
 				: undefined;
+		const abortHandler = () => {
+			if (timedOut || aborted) {
+				return;
+			}
+			aborted = true;
+			abortReason = options.signal?.reason;
+			child.kill("SIGTERM");
+			killTimer = setTimeout(() => {
+				child.kill("SIGKILL");
+			}, 5_000);
+		};
+		if (options.signal) {
+			if (options.signal.aborted) {
+				abortHandler();
+			} else {
+				options.signal.addEventListener("abort", abortHandler, { once: true });
+			}
+		}
 		child.on("error", reject);
 		child.on("close", (code) => {
 			if (timer) {
@@ -74,8 +97,23 @@ function runCommand(
 			if (killTimer) {
 				clearTimeout(killTimer);
 			}
+			if (options.signal) {
+				options.signal.removeEventListener("abort", abortHandler);
+			}
 			if (timedOut) {
 				reject(new Error(`Command timed out after ${options.timeoutMs}ms`));
+				return;
+			}
+			if (aborted) {
+				reject(
+					abortReason instanceof Error
+						? abortReason
+						: new SessionStoppedError({
+								agentId: "unknown",
+								sessionRecordId: "unknown",
+								message: String(abortReason ?? "Session was stopped"),
+							}),
+				);
 				return;
 			}
 			resolvePromise({
@@ -178,11 +216,13 @@ export async function runWorkerInContainer(
 	containerName: string,
 	payload: string,
 	env: Record<string, string | undefined>,
+	signal?: AbortSignal,
 ): Promise<string> {
 	const envArgs = Object.entries(env).flatMap(([key, value]) => (value ? ["-e", `${key}=${value}`] : []));
 	const result = await runCommand("docker", ["exec", "-i", ...envArgs, containerName, ...getNekoclawWorkerCommand()], {
 		input: payload,
 		timeoutMs: 300_000,
+		signal,
 	});
 	if (result.exitCode !== 0) {
 		throw new Error(result.stderr.trim() || `Worker command failed in ${containerName}`);

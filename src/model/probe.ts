@@ -1,6 +1,11 @@
 import type { RuntimeModelEntry, RuntimeModelProvider, RuntimeModelsConfig } from "./model-types.js";
-import { buildRuntimeModelEntryMetadata, extractRuntimeModelLimits } from "./runtime-model-metadata.js";
+import {
+	buildRuntimeModelEntryMetadataFromInput,
+	type RuntimeModelInputKind,
+} from "./runtime-model-metadata.js";
+import type { DiscoveredRuntimeModelEntry } from "./catalog.js";
 import type { ModelApiFormat, ProxyProbeResult } from "../types.js";
+export { fetchProxyModelCatalog } from "./catalog.js";
 
 interface ProbeOptions {
 	baseUrl: string;
@@ -98,37 +103,6 @@ async function probeAnthropicCompatible(baseUrl: string, apiKey: string, modelId
 	};
 }
 
-function extractDiscoveredProxyModelEntry(value: unknown): DiscoveredProxyModelEntry | undefined {
-	if (!value || typeof value !== "object") {
-		return undefined;
-	}
-	const record = value as Record<string, unknown>;
-	const id = typeof record.id === "string" && record.id.trim().length > 0 ? record.id : undefined;
-	if (!id) {
-		return undefined;
-	}
-	const limits = extractRuntimeModelLimits(record);
-	return {
-		id,
-		name: typeof record.name === "string" && record.name.trim().length > 0 ? record.name : undefined,
-		contextWindow: limits?.contextWindow,
-		maxTokens: limits?.maxTokens,
-	};
-}
-
-export async function fetchProxyModelCatalog(baseUrl: string, apiKey: string | undefined): Promise<DiscoveredProxyModelEntry[]> {
-	const normalized = trimTrailingSlash(baseUrl);
-	const headers = apiKey ? { authorization: `Bearer ${apiKey}` } : undefined;
-	const response = await fetch(`${normalized}/models`, { headers });
-	if (!response.ok) {
-		return [];
-	}
-	const payload = (await response.json()) as { data?: unknown[] };
-	return (payload.data ?? [])
-		.map((entry) => extractDiscoveredProxyModelEntry(entry))
-		.filter((entry): entry is DiscoveredProxyModelEntry => Boolean(entry));
-}
-
 export async function probeProxyProtocol(options: ProbeOptions): Promise<ProxyProbeResult> {
 	const { baseUrl, apiKey, modelId, api } = options;
 	if (api === "openai-completions") {
@@ -159,13 +133,15 @@ interface RuntimeModelConfigOptions {
 	apiKeyEnv: string;
 	modelId: string;
 	name?: string;
+	input?: RuntimeModelInputKind[];
 	contextWindow?: number;
 	maxTokens?: number;
 }
 
-export interface DiscoveredProxyModelEntry {
+export interface DiscoveredProxyModelEntry extends Pick<DiscoveredRuntimeModelEntry, "id" | "name" | "input" | "contextWindow" | "maxTokens"> {
 	id: string;
 	name?: string;
+	input?: RuntimeModelInputKind[];
 	contextWindow?: number;
 	maxTokens?: number;
 }
@@ -175,6 +151,7 @@ function createRuntimeModelEntry(options: {
 	providerConfig?: RuntimeModelProvider;
 	modelId: string;
 	name?: string;
+	input?: RuntimeModelInputKind[];
 	contextWindow?: number;
 	maxTokens?: number;
 }): RuntimeModelEntry {
@@ -183,11 +160,7 @@ function createRuntimeModelEntry(options: {
 		name: options.name ?? options.modelId,
 		...(typeof options.contextWindow === "number" ? { contextWindow: options.contextWindow } : {}),
 		...(typeof options.maxTokens === "number" ? { maxTokens: options.maxTokens } : {}),
-		...buildRuntimeModelEntryMetadata({
-			providerId: options.provider,
-			provider: options.providerConfig,
-			modelId: options.modelId,
-		}),
+		...buildRuntimeModelEntryMetadataFromInput(options.input),
 	};
 }
 
@@ -204,6 +177,7 @@ function createRuntimeModelProvider(options: RuntimeModelConfigOptions): Runtime
 			providerConfig: provider,
 			modelId: options.modelId,
 			name: options.name,
+			input: options.input,
 			contextWindow: options.contextWindow,
 			maxTokens: options.maxTokens,
 		}),
@@ -241,6 +215,7 @@ export function upsertRuntimeModelsConfig(
 			providerConfig: provider,
 			modelId: options.modelId,
 			name: options.name,
+			input: options.input,
 			contextWindow: options.contextWindow,
 			maxTokens: options.maxTokens,
 		}),

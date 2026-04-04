@@ -49,10 +49,11 @@ export interface RunJob {
 
 export interface JobExecutionContext {
 	allowPersonaPrefetchWait: boolean;
+	signal?: AbortSignal;
 }
 
 export interface QueueEvent {
-	type: "enqueue" | "start" | "complete" | "fail";
+	type: "enqueue" | "start" | "complete" | "fail" | "cancel";
 	jobId: string;
 	timestamp: string;
 	job?: RunJob;

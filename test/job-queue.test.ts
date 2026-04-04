@@ -309,7 +309,7 @@ describe("job queue", () => {
 
 		const result = queue.stopSession(agent.agentId, "session-a");
 
-		expect(result).toEqual({ removedQueuedCount: 2, hadQueuedWork: true });
+		expect(result).toEqual({ removedQueuedCount: 2, hadQueuedWork: true, interruptedActiveRun: false });
 		expect(queues.get(agent.agentId)?.has("session-a")).toBe(false);
 		expect(queues.get(agent.agentId)?.get("session-b")).toEqual([b1]);
 		expect(store.recoverPendingJobs(agent.agentId)).toEqual([b1]);
@@ -336,9 +336,74 @@ describe("job queue", () => {
 
 		const result = queue.stopSession(agent.agentId, "session-a");
 
-		expect(result).toEqual({ removedQueuedCount: 2, hadQueuedWork: true });
+		expect(result).toEqual({ removedQueuedCount: 2, hadQueuedWork: true, interruptedActiveRun: false });
 		expect(queues.get(agent.agentId)?.get("session-a")).toEqual([a1]);
 		expect(queues.get(agent.agentId)?.get("session-b")).toEqual([b1]);
 		expect(store.recoverPendingJobs(agent.agentId)).toEqual([a1, b1]);
+	});
+
+	it("aborts the active run and drops queued tail work for the stopped session", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const store = new JsonNekoclawStore();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const agent = store.createAgent({ slug: "stop-cancel-cat" });
+		const starts: string[] = [];
+		const gates = new Map<string, ReturnType<typeof deferred<WorkerResult>>>();
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async (job, context) => {
+			starts.push(job.jobId);
+			const gate = deferred<WorkerResult>();
+			gates.set(job.jobId, gate);
+			context.signal?.addEventListener(
+				"abort",
+				() => {
+					gate.reject(context.signal?.reason);
+				},
+				{ once: true },
+			);
+			return gate.promise;
+		});
+
+		const a1 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:00.000Z", "a");
+		const a2 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:01.000Z", "a");
+		const b1 = createJob(agent.agentId, "session-b", "2026-03-29T00:00:02.000Z", "b");
+
+		await queue.enqueue(a1);
+		await queue.enqueue(a2);
+		await queue.enqueue(b1);
+		await flushMicrotasks(6);
+
+		expect(starts).toEqual([a1.jobId, b1.jobId]);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			runningSessions: 2,
+			queued: 1,
+		});
+
+		const result = queue.stopSession(agent.agentId, "session-a");
+		await flushMicrotasks(8);
+
+		expect(result).toEqual({ removedQueuedCount: 1, hadQueuedWork: true, interruptedActiveRun: true });
+		expect(queues.get(agent.agentId)?.has("session-a")).toBe(false);
+		expect(store.getQueueEvents(agent.agentId).map((event) => ({ type: event.type, jobId: event.jobId }))).toEqual([
+			{ type: "enqueue", jobId: a1.jobId },
+			{ type: "enqueue", jobId: b1.jobId },
+			{ type: "cancel", jobId: a1.jobId },
+		]);
+		expect(store.recoverPendingJobs(agent.agentId)).toEqual([b1]);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			runningSessions: 1,
+			queued: 0,
+		});
+
+		gates.get(b1.jobId)?.resolve({ outbound: {} });
+		await flushMicrotasks(8);
+
+		expect(store.getQueueEvents(agent.agentId).map((event) => event.type)).toEqual(["enqueue", "enqueue", "cancel", "complete"]);
+		expect(store.recoverPendingJobs(agent.agentId)).toEqual([]);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			runningSessions: 0,
+			queued: 0,
+			processing: false,
+		});
 	});
 });

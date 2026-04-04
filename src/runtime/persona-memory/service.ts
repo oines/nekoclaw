@@ -169,13 +169,20 @@ export class PersonaMemoryService {
 	}
 
 	queueDream(agent: AgentSpec, options?: { force?: boolean; skipReason?: string }): void {
+		void this.requestDream(agent, options);
+	}
+
+	requestDream(
+		agent: AgentSpec,
+		options?: { force?: boolean; skipReason?: string },
+	): "queued" | "already_queued" | "no_memory_files" | "skipped" {
 		if (options?.skipReason) {
 			this.auditDreamSkip(agent, options.skipReason, {});
-			return;
+			return "skipped";
 		}
 		if (this.state.dreamQueued.has(agent.agentId)) {
 			this.auditDreamSkip(agent, "already_queued", {});
-			return;
+			return "already_queued";
 		}
 		const paths = this.ensurePersonaLayout(agent.slug);
 		const state = this.readDreamState(paths);
@@ -183,17 +190,17 @@ export class PersonaMemoryService {
 			const lastCompletedAt = Date.parse(state.lastCompletedAt);
 			if (!Number.isNaN(lastCompletedAt) && Date.now() - lastCompletedAt < DREAM_INTERVAL_MS) {
 				this.auditDreamSkip(agent, "not_due", { lastCompletedAt: state.lastCompletedAt });
-				return;
+				return "skipped";
 			}
 		}
 		const snapshot = buildDreamCorpusSnapshot(paths);
 		if (snapshot.indexSizeBytes === 0 && snapshot.manifest.length === 0 && snapshot.observations.length === 0) {
 			this.auditDreamSkip(agent, "no_memory_files", {});
-			return;
+			return "no_memory_files";
 		}
 		if (!options?.force && state.lastCorpusSignature && state.lastCorpusSignature === snapshot.corpusSignature) {
 			this.auditDreamSkip(agent, "no_corpus_change", { corpusSignature: snapshot.corpusSignature });
-			return;
+			return "skipped";
 		}
 		this.state.dreamQueued.add(agent.agentId);
 		this.state.dreamSkipAuditCache.delete(agent.agentId);
@@ -210,6 +217,7 @@ export class PersonaMemoryService {
 				this.state.dreamQueued.delete(agent.agentId);
 			}
 		});
+		return "queued";
 	}
 
 	noteDreamSkip(agent: AgentSpec, reason: "agent_busy"): void {

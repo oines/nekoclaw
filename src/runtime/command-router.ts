@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { SESSION_COMPACTION_SETTINGS, SESSION_PRUNING_ENABLED } from "./session-hygiene.js";
-import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { parseAddressedSlashCommand } from "../command-parsing.js";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
 import { upsertRuntimeModelsConfig } from "../model/probe.js";
@@ -36,6 +35,7 @@ type ParsedCommand =
 	| { kind: "help" }
 	| { kind: "status" }
 	| { kind: "stop" }
+	| { kind: "dream" }
 	| { kind: "reset" }
 	| { kind: "model"; scope: "session" | "global"; provider: string; modelId: string }
 	| { kind: "trigger"; mode: "all" | "mention" | "" };
@@ -48,10 +48,15 @@ export class CommandRouterService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly getQueueStatus: (agentId: string) => QueueStatus,
-		private readonly stopSession: (agentId: string, sessionRecordId: string) => { removedQueuedCount: number; hadQueuedWork: boolean } = () => ({
+		private readonly stopSession: (
+			agentId: string,
+			sessionRecordId: string,
+		) => { removedQueuedCount: number; hadQueuedWork: boolean; interruptedActiveRun: boolean } = () => ({
 			removedQueuedCount: 0,
 			hadQueuedWork: false,
+			interruptedActiveRun: false,
 		}),
+		private readonly triggerDream: (agentId: string) => "queued" | "already_queued" | "no_memory_files" = () => "queued",
 	) {
 		this.tokenService = new TokenService(store);
 	}
@@ -115,20 +120,27 @@ export class CommandRouterService {
 				});
 				return true;
 			case "stop":
-				if (!session) {
-					await this.reply(plugin, event, {
-						text: "当前会话没有正在排队的任务。",
-					});
+				if (session) {
+					this.stopSession(agent.agentId, session.sessionRecordId);
+				}
+				return true;
+			case "dream":
+				if (!isAdmin) {
+					await this.reply(plugin, event, { text: "Only admins can use /dream." });
 					return true;
 				}
-				const stopResult = this.stopSession(agent.agentId, session.sessionRecordId);
-				await this.reply(plugin, event, {
-					text:
-						stopResult.removedQueuedCount > 0
-							? `已停止当前会话的后续任务：清除了 ${stopResult.removedQueuedCount} 个排队任务。`
-							: "当前会话没有正在排队的任务。",
-				});
-				return true;
+				switch (this.triggerDream(agent.agentId)) {
+					case "already_queued":
+						await this.reply(plugin, event, { text: "Dream is already running or queued." });
+						return true;
+					case "no_memory_files":
+						await this.reply(plugin, event, { text: "No persona memory files available for dream yet." });
+						return true;
+					case "queued":
+					default:
+						await this.reply(plugin, event, { text: "Dream started." });
+						return true;
+				}
 			case "trigger":
 				if (!isAdmin) {
 					await this.reply(plugin, event, { text: "Only admins can use /trigger." });
@@ -225,6 +237,8 @@ export class CommandRouterService {
 				return { kind: "status" };
 			case "stop":
 				return { kind: "stop" };
+			case "dream":
+				return { kind: "dream" };
 			case "trigger": {
 				const mode = args[0];
 				if (mode === "all" || mode === "mention") {
@@ -379,9 +393,10 @@ export class CommandRouterService {
 			"/help - Show this command list",
 			"/status - Show session status and your platform user id",
 			"/pair - Pair the current chat if it is not paired yet",
-			"/stop - Clear queued follow-up tasks for the current session",
+			"/stop - Stop all current work for the current session",
 		];
 		if (isAdmin) {
+			lines.push("/dream - Run persona dream maintenance now");
 			lines.push("/reset - Reset the current session");
 			lines.push("/model provider/model - Change the current session model");
 			lines.push("/model --global provider/model - Change the agent default model");
@@ -410,17 +425,9 @@ export class CommandRouterService {
 		if (!modelConfig || provider !== agent.provider) {
 			return false;
 		}
-		if (modelConfig.kind === "builtin") {
-			const registry = new ModelRegistry(AuthStorage.inMemory(), this.store.getRuntimeModelsPath(agent.slug));
-			return Boolean(registry.find(provider, modelId));
-		}
-		return this.isKnownCustomModel(agent, modelConfig, modelId);
-	}
-
-	private isKnownCustomModel(agent: AgentSpec, modelConfig: Extract<ModelConfig, { kind: "custom" }>, modelId: string): boolean {
 		const config = this.store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig | undefined;
-		const provider = config?.providers?.[modelConfig.providerId];
-		const ids = (provider?.models ?? []).map((entry) => entry.id).filter(Boolean);
+		const runtimeProvider = config?.providers?.[provider];
+		const ids = (runtimeProvider?.models ?? []).map((entry) => entry.id).filter(Boolean);
 		if (ids.length === 0) {
 			return true;
 		}

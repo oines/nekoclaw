@@ -1,9 +1,16 @@
 import chalk from "chalk";
-import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV, NEKOCLAW_NAME } from "../../config.js";
 import type { AgentSpec, ModelConfig } from "../../types.js";
 import type { RuntimeModelsConfig } from "../../model/model-types.js";
-import { fetchProxyModelCatalog, probeProxyProtocol, upsertRuntimeModelsConfig } from "../../model/probe.js";
+import {
+	type DiscoveredRuntimeModelEntry,
+	fetchBuiltinModelCatalog,
+	fetchModelCatalog,
+	fetchProxyModelCatalog,
+	getBuiltinProviderCatalogTargets,
+} from "../../model/catalog.js";
+import { probeProxyProtocol, upsertRuntimeModelsConfig } from "../../model/probe.js";
+import { MODEL_ENV_MAP } from "../../model/provider-key.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import { ask, requireValue, type ModelSetOptions } from "./shared.js";
 
@@ -15,36 +22,48 @@ export function isCustomModel(agent: AgentSpec, store: JsonNekoclawStore): boole
 	return getModelConfig(agent, store)?.kind === "custom";
 }
 
-function getCustomRuntimeProviderConfig(
-	config: RuntimeModelsConfig | undefined,
-	providerId: string,
-): RuntimeModelsConfig["providers"][string] | undefined {
-	return config?.providers[providerId];
-}
-
-function createRegistry(agent: AgentSpec, store: JsonNekoclawStore): ModelRegistry {
-	const authStorage = AuthStorage.inMemory();
-	const modelConfig = getModelConfig(agent, store);
-	if (agent.provider && modelConfig?.kind === "custom") {
-		const customKey = store.getCustomModelApiKey(agent.agentId);
-		if (customKey) {
-			authStorage.setRuntimeApiKey(agent.provider, customKey);
-		}
-	} else if (agent.provider) {
-		const key = store.getProviderKey(agent.agentId, agent.provider);
-		if (key) {
-			authStorage.setRuntimeApiKey(agent.provider, key);
-		}
-	}
-	return new ModelRegistry(authStorage, store.getRuntimeModelsPath(agent.slug));
-}
-
 function uniqueSorted(values: string[]): string[] {
 	return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
 
 async function fetchCustomModelCatalog(baseUrl: string, apiKey: string | undefined) {
 	return fetchProxyModelCatalog(baseUrl, apiKey);
+}
+
+function resolveBuiltinApiKey(
+	agent: AgentSpec,
+	store: JsonNekoclawStore,
+	provider: string,
+	override: string | undefined,
+): string | undefined {
+	return override || store.getProviderKey(agent.agentId, provider) || process.env[MODEL_ENV_MAP[provider] ?? ""];
+}
+
+function persistCatalogEntries(
+	current: RuntimeModelsConfig | undefined,
+	input: {
+		provider: string;
+		baseUrl: string;
+		api: NonNullable<DiscoveredRuntimeModelEntry["sourceApi"]>;
+		apiKeyEnv: string;
+		entries: DiscoveredRuntimeModelEntry[];
+	},
+): RuntimeModelsConfig {
+	let next = current;
+	for (const entry of input.entries) {
+		next = upsertRuntimeModelsConfig(next, {
+			baseUrl: entry.sourceBaseUrl ?? input.baseUrl,
+			api: entry.sourceApi ?? input.api,
+			provider: input.provider,
+			apiKeyEnv: input.apiKeyEnv,
+			modelId: entry.id,
+			name: entry.name,
+			input: entry.input,
+			contextWindow: entry.contextWindow,
+			maxTokens: entry.maxTokens,
+		});
+	}
+	return next ?? { providers: {} };
 }
 
 export function providerNames(): string[] {
@@ -84,37 +103,6 @@ export async function configureBuiltInModel(agentRef: string, store: JsonNekocla
 		return;
 	}
 
-	const registry = createRegistry(agent, store);
-	const availableModels = uniqueSorted(
-		registry
-			.getAll()
-			.filter((model) => model.provider === provider)
-			.map((model) => model.id),
-	);
-	const fallbackModel = availableModels[0] ?? "";
-	const modelId = (options.model ||
-		(await p.select({
-			message: "Select a model",
-			options: availableModels.length > 0
-				? availableModels.map((m) => ({ value: m, label: m }))
-				: [{ value: "custom", label: "Enter model ID manually" }],
-			initialValue: agent.provider === provider ? agent.modelId : fallbackModel,
-		}))) as string;
-
-	if (p.isCancel(modelId)) {
-		p.cancel("Operation cancelled");
-		return;
-	}
-
-	const finalModelId = modelId === "custom"
-		? (await p.text({ message: "Enter model ID" })) as string
-		: modelId;
-
-	if (p.isCancel(finalModelId)) {
-		p.cancel("Operation cancelled");
-		return;
-	}
-
 	const apiKey = (options.apiKey ??
 		(await p.password({
 			message: "Enter API key (leave empty if already set or not needed)",
@@ -125,12 +113,71 @@ export async function configureBuiltInModel(agentRef: string, store: JsonNekocla
 		return;
 	}
 
+	const effectiveApiKey = resolveBuiltinApiKey(agent, store, provider, apiKey || undefined);
+	const discoveredModels = await fetchBuiltinModelCatalog(provider, effectiveApiKey);
+	const availableModels = uniqueSorted(discoveredModels.map((entry) => entry.id));
+	const fallbackModel = availableModels[0] ?? "";
+	const modelId = (options.model ||
+		(await p.select({
+			message: "Select a model",
+			options: availableModels.length > 0
+				? availableModels.map((model) => ({ value: model, label: model }))
+				: [{ value: "manual", label: "Enter model ID manually" }],
+			initialValue: agent.provider === provider ? agent.modelId : fallbackModel,
+		}))) as string;
+
+	if (p.isCancel(modelId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
+	const finalModelId = modelId === "manual"
+		? (await p.text({ message: "Enter model ID" })) as string
+		: modelId;
+
+	if (p.isCancel(finalModelId)) {
+		p.cancel("Operation cancelled");
+		return;
+	}
+
 	store.setBuiltinModelConfig(agent.agentId, {
 		provider,
 		modelId: finalModelId,
 		apiKey: apiKey || undefined,
 		thinkingLevel: agent.thinkingLevel,
 	});
+
+	const targets = getBuiltinProviderCatalogTargets(provider, effectiveApiKey);
+	if (targets.length > 0) {
+		const selected = discoveredModels.find((entry) => entry.id === finalModelId);
+		const current = store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig | undefined;
+		let config = current;
+		if (discoveredModels.length > 0) {
+			config = persistCatalogEntries(config, {
+				provider,
+				baseUrl: targets[0]!.baseUrl,
+				api: targets[0]!.api,
+				apiKeyEnv: MODEL_ENV_MAP[provider] ?? "",
+				entries: discoveredModels,
+			});
+		}
+		if (!selected) {
+			config = upsertRuntimeModelsConfig(config, {
+				baseUrl: targets[0]!.baseUrl,
+				api: targets[0]!.api,
+				provider,
+				apiKeyEnv: MODEL_ENV_MAP[provider] ?? "",
+				modelId: finalModelId,
+			});
+		}
+		if (config) {
+			store.writeRuntimeModelsConfig(agent.agentId, config, {
+				source: "builtin-model-set",
+				providerId: provider,
+				modelId: finalModelId,
+			});
+		}
+	}
 	p.note(`Current model: ${provider}/${finalModelId}`, chalk.green("Model updated"));
 }
 
@@ -203,7 +250,19 @@ export async function configureCustomModel(agentRef: string, store: JsonNekoclaw
 		modelId: finalModelId,
 	});
 	s.stop("Probe successful");
-	const discoveredModel = listedModels.find((entry) => entry.id === finalModelId);
+	let refreshedModels: DiscoveredRuntimeModelEntry[] = [];
+	try {
+		refreshedModels = await fetchModelCatalog({
+			providerId,
+			api: probe.api,
+			baseUrl,
+			apiKey: apiKey || undefined,
+		});
+	} catch {
+		refreshedModels = [];
+	}
+	const discoveredModels = refreshedModels.length > 0 ? refreshedModels : listedModels;
+	const discoveredModel = discoveredModels.find((entry) => entry.id === finalModelId);
 
 	const updatedAgent = store.setCustomModelConfig(agent.agentId, {
 		baseUrl: baseUrl.replace(/\/+$/, ""),
@@ -218,13 +277,24 @@ export async function configureCustomModel(agentRef: string, store: JsonNekoclaw
 		throw new Error(`Custom provider ID was not assigned for ${updatedAgent.slug}`);
 	}
 
-	const config = upsertRuntimeModelsConfig(store.readRuntimeModelsConfig(updatedAgent.agentId) as RuntimeModelsConfig | undefined, {
+	let config = store.readRuntimeModelsConfig(updatedAgent.agentId) as RuntimeModelsConfig | undefined;
+	if (discoveredModels.length > 0) {
+		config = persistCatalogEntries(config, {
+			provider: updatedAgent.provider,
+			baseUrl: baseUrl.replace(/\/+$/, ""),
+			api: probe.api,
+			apiKeyEnv: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
+			entries: discoveredModels,
+		});
+	}
+	config = upsertRuntimeModelsConfig(config, {
 		baseUrl,
 		api: probe.api,
 		provider: updatedAgent.provider,
 		apiKeyEnv: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
 		modelId: finalModelId,
 		name: discoveredModel?.name,
+		input: discoveredModel?.input,
 		contextWindow: discoveredModel?.contextWindow,
 		maxTokens: discoveredModel?.maxTokens,
 	});
@@ -257,16 +327,24 @@ export async function handleModelList(agentRef: string, store: JsonNekoclawStore
 
 	let ids: string[] = [];
 	if (isCustomModel(agent, store)) {
-		const config = store.readRuntimeModelsConfig(agent.agentId) as unknown as RuntimeModelsConfig | undefined;
-		const provider = getCustomRuntimeProviderConfig(config, agent.provider);
-		ids = uniqueSorted((provider?.models ?? []).map((entry) => entry.id).filter(Boolean) as string[]);
+		const modelConfig = getModelConfig(agent, store) as Extract<ModelConfig, { kind: "custom" }>;
+		try {
+			ids = uniqueSorted(
+				(
+					await fetchModelCatalog({
+						providerId: modelConfig.providerId,
+						api: modelConfig.api,
+						baseUrl: modelConfig.baseUrl,
+						apiKey: store.getCustomModelApiKey(agent.agentId),
+					})
+				).map((entry) => entry.id),
+			);
+		} catch {
+			ids = [];
+		}
 	} else {
-		const registry = createRegistry(agent, store);
 		ids = uniqueSorted(
-			registry
-				.getAll()
-				.filter((model) => model.provider === agent.provider)
-				.map((model) => model.id),
+			(await fetchBuiltinModelCatalog(agent.provider, resolveBuiltinApiKey(agent, store, agent.provider, undefined))).map((entry) => entry.id),
 		);
 	}
 

@@ -1,4 +1,5 @@
 import type { AgentSpec } from "../../types/agent.js";
+import type { ModelApiFormat } from "../../types/common.js";
 import { AgentStore } from "../agent-store.js";
 import { AuditStore } from "../audit-store.js";
 import { ModelStore } from "../model-store.js";
@@ -61,7 +62,7 @@ export class ContentService {
 		agentRef: string,
 		input: {
 			baseUrl: string;
-			api: "openai-completions" | "anthropic-messages";
+			api: ModelApiFormat;
 			providerId: string;
 			modelId: string;
 			apiKey?: string;

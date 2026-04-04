@@ -70,6 +70,11 @@ export class NekoclawDaemon {
 			this.store,
 			(agentId) => this.jobQueue.getStatus(agentId),
 			(agentId, sessionRecordId) => this.jobQueue.stopSession(agentId, sessionRecordId),
+			(agentId) => {
+				const agent = this.store.getAgentByRef(agentId);
+				const status = this.personaMemory.requestDream(agent, { force: true });
+				return status === "skipped" ? "queued" : status;
+			},
 		);
 		this.messageRouter = new MessageRouterService(this.store, this.channelPlugins, commands, (job) => this.jobQueue.enqueue(job), this.personaMemory);
 		this.channelRuntime = new ChannelRuntimeService(this.store, this.channelPlugins, getRuntimeKey, (agentId, channelType, event) =>

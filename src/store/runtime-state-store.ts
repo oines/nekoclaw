@@ -89,7 +89,7 @@ export class RuntimeStateStore {
 				pending.set(event.jobId, event.job);
 				continue;
 			}
-			if (event.type === "complete" || event.type === "fail") {
+			if (event.type === "complete" || event.type === "fail" || event.type === "cancel") {
 				pending.delete(event.jobId);
 			}
 		}

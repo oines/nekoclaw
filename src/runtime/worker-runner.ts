@@ -140,7 +140,12 @@ export class WorkerRunnerService {
 		}
 
 		try {
-			const stdout = await runWorkerInContainer(agent.containerName, `${JSON.stringify(payload)}\n`, this.getWorkerEnv(agent));
+			const stdout = await runWorkerInContainer(
+				agent.containerName,
+				`${JSON.stringify(payload)}\n`,
+				this.getWorkerEnv(agent),
+				context?.signal,
+			);
 			const result = parseWorkerResult(stdout);
 			if (result.toolActions?.length) {
 				await this.outbound.executeToolActions(agent, session, result.toolActions);

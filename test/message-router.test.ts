@@ -423,8 +423,7 @@ describe("message router", () => {
 			occurredAt: "2026-03-29T00:00:00.000Z",
 		});
 
-		expect(reply).toHaveBeenCalledTimes(1);
-		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("当前会话没有正在排队的任务。");
+		expect(reply).not.toHaveBeenCalled();
 		expect(enqueue).not.toHaveBeenCalled();
 	});
 
@@ -485,8 +484,7 @@ describe("message router", () => {
 			occurredAt: "2026-03-29T00:00:00.000Z",
 		});
 
-		expect(reply).toHaveBeenCalledTimes(1);
-		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("当前会话没有正在排队的任务。");
+		expect(reply).not.toHaveBeenCalled();
 		expect(send).not.toHaveBeenCalled();
 		expect(buildPairPrompt).not.toHaveBeenCalled();
 		expect(enqueue).not.toHaveBeenCalled();

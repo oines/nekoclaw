@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildRuntimeModelEntryMetadata, resolveRuntimeModelInput } from "../src/model/runtime-model-metadata.js";
+import {
+	buildRuntimeModelEntryMetadataFromInput,
+	extractRuntimeModelInput,
+	extractRuntimeModelLimits,
+	resolveRuntimeModelInput,
+} from "../src/model/runtime-model-metadata.js";
 import type { RuntimeModelsConfig } from "../src/model/model-types.js";
 
 describe("runtime model metadata", () => {
-	it("maps legacy capabilities to image input", () => {
+	it("maps legacy capabilities to image input from persisted runtime entries", () => {
 		const config: RuntimeModelsConfig = {
 			providers: {
 				"openrouter-direct": {
@@ -25,16 +30,31 @@ describe("runtime model metadata", () => {
 		]);
 	});
 
-	it("infers image input for known OpenRouter-compatible custom models", () => {
-		const metadata = buildRuntimeModelEntryMetadata({
-			providerId: "openrouter-direct",
-			provider: {
-				baseUrl: "https://openrouter.ai/api/v1",
-				api: "openai-completions",
-			},
-			modelId: "google/gemini-3.1-flash-lite-preview",
+	it("extracts image input from upstream model payloads without relying on model ids", () => {
+		expect(
+			extractRuntimeModelInput({
+				id: "provider/model",
+				architecture: {
+					modality: "text+image->text",
+				},
+			}),
+		).toEqual(["text", "image"]);
+	});
+
+	it("extracts token limits and builds capabilities from explicit upstream metadata", () => {
+		expect(
+			extractRuntimeModelLimits({
+				id: "models/gemini-2.5-flash",
+				inputTokenLimit: 1_048_576,
+				outputTokenLimit: 65_535,
+			}),
+		).toEqual({
+			contextWindow: 1_048_576,
+			maxTokens: 65_535,
 		});
-		expect(metadata.input).toEqual(["text", "image"]);
-		expect(metadata.capabilities).toEqual(["text", "vision"]);
+		expect(buildRuntimeModelEntryMetadataFromInput(["text", "image"])).toEqual({
+			input: ["text", "image"],
+			capabilities: ["text", "vision"],
+		});
 	});
 });

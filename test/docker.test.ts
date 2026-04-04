@@ -40,7 +40,7 @@ describe("docker worker runtime", () => {
 		const { getNekoclawWorkerCommand } = await import("../src/runtime/docker.js");
 		expect(getNekoclawWorkerCommand()).toEqual([
 			"node",
-			"/opt/nekoclaw-src/nekoclaw/dist/cli.js",
+			"/opt/nekoclaw-src/dist/cli.js",
 			"__nekoclaw_internal",
 			"worker",
 			"run",
@@ -49,7 +49,7 @@ describe("docker worker runtime", () => {
 
 	it("resolves the actual runtime mount root from the dependency layout", async () => {
 		const { getNodeModulesRoot, getRuntimeMountRoot } = await import("../src/runtime/docker.js");
-		const root = globalThis.process.cwd().replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+		const root = globalThis.process.cwd().replace(/\\/g, "/");
 		expect(getNodeModulesRoot()).toBe(`${root}/node_modules`);
 		expect(getRuntimeMountRoot()).toBe(root);
 	});

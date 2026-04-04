@@ -6,6 +6,7 @@ import type {
 	ChannelSpec,
 	ChannelType,
 	ChatKind,
+	ModelApiFormat,
 	ModelConfig,
 	PairRequest,
 	PairingConfig,
@@ -512,7 +513,7 @@ export class JsonNekoclawStore {
 		agentRef: string,
 		input: {
 			baseUrl: string;
-			api: "openai-completions" | "anthropic-messages";
+			api: ModelApiFormat;
 			providerId: string;
 			modelId: string;
 			apiKey?: string;

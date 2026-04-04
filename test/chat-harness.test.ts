@@ -331,6 +331,141 @@ describe("internal chat harness", () => {
 		});
 	});
 
+	it("silently stops only the current session in the real telegram routing path", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { createTelegramChannelPlugin } = await import("../src/channels/telegram.js");
+		const { FakeTelegramBot, createTelegramMessage } = await import("../src/internal/chat-harness/fake-transports.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { JobQueueService } = await import("../src/runtime/job-queue.js");
+		const { MessageRouterService } = await import("../src/runtime/message-router.js");
+		const { OutboundDispatchService } = await import("../src/runtime/outbound-dispatch.js");
+		const { getRuntimeKey } = await import("../src/runtime/runtime-key.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "stop-routing-cat" });
+		store.createChannel(agent.agentId, "telegram");
+		store.setChannelToken(agent.agentId, "telegram", "token");
+		const channel = store.getChannel(agent.agentId, "telegram");
+		const sessionA = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "1101",
+			chatKind: "dm",
+		});
+		const sessionB = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "1102",
+			chatKind: "dm",
+		});
+
+		const fakeBot = new FakeTelegramBot({ id: 9001, username: "mock_bot" });
+		const plugin = createTelegramChannelPlugin(channel, "token", undefined, "all", { bot: fakeBot });
+		const plugins = new Map([[getRuntimeKey(agent.agentId, channel.type), plugin]]);
+		const outboundDispatch = new OutboundDispatchService(store, plugins);
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const starts: string[] = [];
+		const gates = new Map<string, ReturnType<typeof deferred<WorkerResult>>>();
+		const jobQueue = new JobQueueService(store, queues, activeRunsByAgent, async (job, context) => {
+			starts.push(job.sessionRecordId);
+			const gate = deferred<WorkerResult>();
+			gates.set(job.sessionRecordId, gate);
+			context.signal?.addEventListener(
+				"abort",
+				() => {
+					gate.reject(context.signal?.reason);
+				},
+				{ once: true },
+			);
+			const result = await gate.promise;
+			const session = store.getSession(agent.agentId, job.sessionRecordId);
+			if (result.outbound.text?.trim()) {
+				await outboundDispatch.sendToSession(agent, session, job.event, result.outbound);
+			}
+			return result;
+		});
+		jobQueue.initialize();
+		const commands = new CommandRouterService(store, (agentId) => jobQueue.getStatus(agentId), (agentId, sessionRecordId) =>
+			jobQueue.stopSession(agentId, sessionRecordId),
+		);
+		const messageRouter = new MessageRouterService(store, plugins, commands, (job) => jobQueue.enqueue(job));
+
+		plugin.startPolling({
+			onEvent: async (event) => {
+				await messageRouter.handleInbound(agent.agentId, "telegram", event);
+			},
+			onError: (error) => {
+				throw error;
+			},
+		});
+		await flushMicrotasks();
+
+		await fakeBot.emitInbound(
+			createTelegramMessage({
+				chatId: 1101,
+				chatType: "private",
+				messageId: 1,
+				text: "session A blocked",
+				from: { id: 101, first_name: "Alice" },
+			}),
+		);
+		await fakeBot.emitInbound(
+			createTelegramMessage({
+				chatId: 1101,
+				chatType: "private",
+				messageId: 2,
+				text: "session A queued follow up",
+				from: { id: 101, first_name: "Alice" },
+			}),
+		);
+		await fakeBot.emitInbound(
+			createTelegramMessage({
+				chatId: 1102,
+				chatType: "private",
+				messageId: 3,
+				text: "session B can continue",
+				from: { id: 202, first_name: "Bob" },
+			}),
+		);
+		await flushMicrotasks(8);
+
+		expect(starts).toEqual([sessionA.sessionRecordId, sessionB.sessionRecordId]);
+		expect(jobQueue.getStatus(agent.agentId)).toMatchObject({
+			runningSessions: 2,
+			queued: 1,
+		});
+
+		await fakeBot.emitInbound(
+			createTelegramMessage({
+				chatId: 1101,
+				chatType: "private",
+				messageId: 4,
+				text: "/stop",
+				from: { id: 101, first_name: "Alice" },
+			}),
+		);
+		await flushMicrotasks(12);
+
+		expect(jobQueue.getStatus(agent.agentId)).toMatchObject({
+			runningSessions: 1,
+			queued: 0,
+		});
+		expect(store.recoverPendingJobs(agent.agentId).map((job) => job.sessionRecordId)).toEqual([sessionB.sessionRecordId]);
+		expect(fakeBot.transcript.filter((entry) => entry.kind === "outbound" && entry.chatId === "1101")).toEqual([]);
+
+		gates.get(sessionB.sessionRecordId)?.resolve({ outbound: { text: "reply-from-b" } });
+		await flushMicrotasks(8);
+
+		expect(fakeBot.transcript.filter((entry) => entry.kind === "outbound").map((entry) => ({
+			chatId: entry.chatId,
+			text: entry.text,
+		}))).toEqual([{ chatId: "1102", text: "reply-from-b" }]);
+		expect(jobQueue.getStatus(agent.agentId)).toMatchObject({
+			runningSessions: 0,
+			queued: 0,
+			processing: false,
+		});
+	});
+
 	it("runs scheduled reminder harness scenarios for telegram and napcat across dm, group, and reset invalidation", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { runChatHarnessInCurrentEnvironment } = await import("../src/internal/chat-harness/current-env.js");

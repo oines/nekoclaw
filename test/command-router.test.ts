@@ -19,6 +19,31 @@ function formatCompactTokens(value: number): string {
 	return value.toLocaleString("en-US");
 }
 
+function seedRuntimeModelMetadata(input: {
+	store: {
+		writeRuntimeModelsConfig(agentRef: string, config: Record<string, unknown>, details: Record<string, unknown>): void;
+	};
+	agentId: string;
+	provider: string;
+	api: string;
+	baseUrl: string;
+	models: Array<{ id: string; contextWindow?: number; maxTokens?: number }>;
+}) {
+	input.store.writeRuntimeModelsConfig(
+		input.agentId,
+		{
+			providers: {
+				[input.provider]: {
+					baseUrl: input.baseUrl,
+					api: input.api,
+					models: input.models,
+				},
+			},
+		},
+		{},
+	);
+}
+
 describe("runtime command router", () => {
 	let tempHome: string;
 	const originalHome = process.env.HOME;
@@ -94,6 +119,14 @@ describe("runtime command router", () => {
 		const store = new JsonNekoclawStore();
 		store.createAgent({ slug: "status-cat" });
 		const agent = store.setBuiltinModelConfig("status-cat", { provider: "openai", modelId: "gpt-5" });
+		seedRuntimeModelMetadata({
+			store,
+			agentId: agent.agentId,
+			provider: "openai",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			models: [{ id: "gpt-5", contextWindow: 200000, maxTokens: 100000 }],
+		});
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "123",
@@ -190,6 +223,17 @@ describe("runtime command router", () => {
 		const store = new JsonNekoclawStore();
 		store.createAgent({ slug: "status-override-cat" });
 		const agent = store.setBuiltinModelConfig("status-override-cat", { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		seedRuntimeModelMetadata({
+			store,
+			agentId: agent.agentId,
+			provider: "openai",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			models: [
+				{ id: "gpt-5", contextWindow: 200000, maxTokens: 100000 },
+				{ id: "gpt-5-mini", contextWindow: 200000, maxTokens: 100000 },
+			],
+		});
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "123",
@@ -269,6 +313,43 @@ describe("runtime command router", () => {
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Context: 0/?");
 	});
 
+	it("shows unknown context for built-in models when upstream metadata does not provide a context window", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "status-builtin-unknown-cat" });
+		const agent = store.setBuiltinModelConfig("status-builtin-unknown-cat", {
+			provider: "openai",
+			modelId: "gpt-5",
+			apiKey: "test-key",
+		});
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "321",
+			chatKind: "dm",
+		});
+		const reply = vi.fn(async () => []);
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+
+		await router.handleCommand(
+			agent,
+			{ actions: { reply } } as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "321",
+				chatKind: "dm",
+				messageId: "220",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/status" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			session,
+		);
+
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Context: 0/?");
+	});
+
 	it("reads the latest usage snapshot from context jsonl for status context usage", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");
@@ -276,6 +357,14 @@ describe("runtime command router", () => {
 		const store = new JsonNekoclawStore();
 		store.createAgent({ slug: "status-usage-cat" });
 		const agent = store.setBuiltinModelConfig("status-usage-cat", { provider: "openai", modelId: "gpt-5" });
+		seedRuntimeModelMetadata({
+			store,
+			agentId: agent.agentId,
+			provider: "openai",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			models: [{ id: "gpt-5", contextWindow: 200000, maxTokens: 100000 }],
+		});
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "333",
@@ -491,8 +580,125 @@ describe("runtime command router", () => {
 		expect(text).toContain("/help - Show this command list");
 		expect(text).toContain("/status - Show session status and your platform user id");
 		expect(text).toContain("/pair - Pair the current chat if it is not paired yet");
-		expect(text).toContain("/stop - Clear queued follow-up tasks for the current session");
+		expect(text).toContain("/stop - Stop all current work for the current session");
+		expect(text).toContain("/dream - Run persona dream maintenance now");
 		expect(text).toContain("/trigger mention - Trigger only on mentions for this channel");
+	});
+
+	it("lets admins trigger dream from an unpaired chat", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "dream-cat" });
+		const agent = store.setBuiltinModelConfig("dream-cat", { provider: "openai", modelId: "gpt-5" });
+		store.addAdmin(agent.agentId, { channelType: "telegram", externalUserId: "9001" });
+		const reply = vi.fn(async () => []);
+		const triggerDream = vi.fn(() => "queued" as const);
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 0, hadQueuedWork: false, interruptedActiveRun: false }));
+		const router = new CommandRouterService(
+			store,
+			() => ({ queued: 0, processing: false, currentJobId: undefined }),
+			stopSession,
+			triggerDream,
+		);
+
+		const handled = await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "108",
+				sender: { externalId: "9001" },
+				blocks: [{ kind: "text", text: "/dream" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			undefined,
+		);
+
+		expect(handled).toBe(true);
+		expect(triggerDream).toHaveBeenCalledWith(agent.agentId);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("Dream started.");
+	});
+
+	it("reports when dream is already queued", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "dream-busy-cat" });
+		const agent = store.setBuiltinModelConfig("dream-busy-cat", { provider: "openai", modelId: "gpt-5" });
+		store.addAdmin(agent.agentId, { channelType: "telegram", externalUserId: "9001" });
+		const reply = vi.fn(async () => []);
+		const triggerDream = vi.fn(() => "already_queued" as const);
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 0, hadQueuedWork: false, interruptedActiveRun: false }));
+		const router = new CommandRouterService(
+			store,
+			() => ({ queued: 0, processing: false, currentJobId: undefined }),
+			stopSession,
+			triggerDream,
+		);
+
+		await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "109",
+				sender: { externalId: "9001" },
+				blocks: [{ kind: "text", text: "/dream" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			undefined,
+		);
+
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("Dream is already running or queued.");
+	});
+
+	it("rejects /dream for non-admin users", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "dream-non-admin-cat" });
+		const agent = store.setBuiltinModelConfig("dream-non-admin-cat", { provider: "openai", modelId: "gpt-5" });
+		const reply = vi.fn(async () => []);
+		const triggerDream = vi.fn(() => "queued" as const);
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 0, hadQueuedWork: false, interruptedActiveRun: false }));
+		const router = new CommandRouterService(
+			store,
+			() => ({ queued: 0, processing: false, currentJobId: undefined }),
+			stopSession,
+			triggerDream,
+		);
+
+		await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "110",
+				sender: { externalId: "777" },
+				blocks: [{ kind: "text", text: "/dream" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			undefined,
+		);
+
+		expect(triggerDream).not.toHaveBeenCalled();
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("Only admins can use /dream.");
 	});
 
 	it("clears queued follow-up tasks for the current session through /stop", async () => {
@@ -507,7 +713,7 @@ describe("runtime command router", () => {
 			chatKind: "dm",
 		});
 		const reply = vi.fn(async () => []);
-		const stopSession = vi.fn(() => ({ removedQueuedCount: 2, hadQueuedWork: true }));
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 2, hadQueuedWork: true, interruptedActiveRun: true }));
 		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }), stopSession);
 
 		const handled = await router.handleCommand(
@@ -530,7 +736,7 @@ describe("runtime command router", () => {
 
 		expect(handled).toBe(true);
 		expect(stopSession).toHaveBeenCalledWith(agent.agentId, session.sessionRecordId);
-		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("已停止当前会话的后续任务：清除了 2 个排队任务。");
+		expect(reply).not.toHaveBeenCalled();
 	});
 
 	it("returns a no-op message for /stop when the chat is not paired", async () => {
@@ -540,7 +746,7 @@ describe("runtime command router", () => {
 		store.createAgent({ slug: "stop-unpaired-cat" });
 		const agent = store.setBuiltinModelConfig("stop-unpaired-cat", { provider: "openai", modelId: "gpt-5" });
 		const reply = vi.fn(async () => []);
-		const stopSession = vi.fn(() => ({ removedQueuedCount: 0, hadQueuedWork: false }));
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 0, hadQueuedWork: false, interruptedActiveRun: false }));
 		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }), stopSession);
 
 		const handled = await router.handleCommand(
@@ -563,7 +769,7 @@ describe("runtime command router", () => {
 
 		expect(handled).toBe(true);
 		expect(stopSession).not.toHaveBeenCalled();
-		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("当前会话没有正在排队的任务。");
+		expect(reply).not.toHaveBeenCalled();
 	});
 
 	it("creates a real pair prompt for an unpaired /pair command", async () => {

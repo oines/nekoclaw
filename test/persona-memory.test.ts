@@ -89,6 +89,12 @@ describe("persona memory service", () => {
 		vi.doUnmock("@mariozechner/pi-ai");
 	});
 
+	it("uses a ten minute maintenance timeout", async () => {
+		const { MAINTENANCE_TIMEOUT_MS } = await import("../src/runtime/persona-memory/constants.js");
+
+		expect(MAINTENANCE_TIMEOUT_MS).toBe(600_000);
+	});
+
 	it("appends scene observations and exposes the latest scene window in prepared context", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
@@ -1132,6 +1138,30 @@ describe("persona memory service", () => {
 		releaseFormation?.();
 		await personaMemory.whenIdle(agent.agentId);
 		expect(timeline).toEqual(["formation:start", "formation:end", "dream:start"]);
+	});
+
+	it("returns dream trigger status for queued, already queued, and no-memory cases", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "dream-status-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const personaMemory = new PersonaMemoryService(store);
+
+		expect(personaMemory.requestDream(agent, { force: true })).toBe("no_memory_files");
+
+		writeTextFile(join(store.getPersonaPeopleDir(agent.slug), "known.md"), "已知人物。");
+		const runDream = vi.spyOn(personaMemory as any, "runDream").mockImplementation(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		expect(personaMemory.requestDream(agent, { force: true })).toBe("queued");
+		expect(personaMemory.requestDream(agent, { force: true })).toBe("already_queued");
+
+		await personaMemory.whenIdle(agent.agentId);
+		expect(runDream).toHaveBeenCalledTimes(1);
 	});
 
 	it("applies dream rewrites without consuming observations and records dream audits", async () => {
