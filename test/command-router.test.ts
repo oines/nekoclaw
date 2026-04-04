@@ -69,6 +69,8 @@ describe("runtime command router", () => {
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Session key: ${session.sessionKey}`);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("running_sessions=");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Active runs:");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction: enabled=yes");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction reserveTokens: 20000");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction keepRecentTokens: 20000");

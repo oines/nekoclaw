@@ -6,6 +6,43 @@ import { JobQueueService } from "../src/runtime/job-queue.js";
 import { QueueFullError } from "../src/runtime/errors.js";
 import type { RunJob, WorkerResult } from "../src/types.js";
 
+function createJob(agentId: string, sessionRecordId: string, createdAt: string, chatId = sessionRecordId): RunJob {
+	return {
+		jobId: `job-${sessionRecordId}-${createdAt}`,
+		agentId,
+		kind: "inbound",
+		sessionRecordId,
+		sessionKey: `agent:test:telegram:direct:${sessionRecordId}`,
+		createdAt,
+		event: {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId,
+			chatKind: "dm",
+			messageId: `m-${sessionRecordId}-${createdAt}`,
+			sender: {},
+			blocks: [{ kind: "text", text: "hello" }],
+			occurredAt: createdAt,
+		},
+	};
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (error?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(times = 3): Promise<void> {
+	for (let index = 0; index < times; index += 1) {
+		await Promise.resolve();
+	}
+}
+
 describe("job queue", () => {
 	let tempHome: string;
 	const originalHome = process.env.HOME;
@@ -26,72 +63,32 @@ describe("job queue", () => {
 		rmSync(tempHome, { recursive: true, force: true });
 	});
 
-	it("persists enqueue events before mutating the in-memory queue", async () => {
+	it("persists enqueue events before mutating the in-memory session queue", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const store = new JsonNekoclawStore();
-		const queues = new Map<string, RunJob[]>();
-		const processing = new Set<string>();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
 		const agent = store.createAgent({ slug: "queue-cat" });
-		const queue = new JobQueueService(store, queues, processing, async () => ({ outbound: {} }));
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async () => ({ outbound: {} }));
 		const appendSpy = vi.spyOn(store, "appendQueueEvent").mockImplementation((agentId, event) => {
 			expect(agentId).toBe(agent.agentId);
-			expect(event.type).toBe("enqueue");
-			expect(queues.get(agent.agentId) ?? []).toHaveLength(0);
-		});
-		const processSpy = vi.spyOn(queue, "processQueue").mockResolvedValue(undefined);
-
-		await queue.enqueue({
-			jobId: "job-1",
-			agentId: agent.agentId,
-			kind: "inbound",
-			sessionRecordId: "session-1",
-			sessionKey: "agent:queue-cat:telegram:direct:1",
-			createdAt: "2026-03-29T00:00:00.000Z",
-			event: {
-				eventType: "message.created",
-				channelType: "telegram",
-				chatId: "1",
-				chatKind: "dm",
-				messageId: "m1",
-				sender: {},
-				blocks: [{ kind: "text", text: "hello" }],
-				occurredAt: "2026-03-29T00:00:00.000Z",
-			},
+			if (event.type === "enqueue") {
+				expect(queues.get(agent.agentId)?.get("session-1") ?? []).toHaveLength(0);
+			}
 		});
 
-		expect(appendSpy).toHaveBeenCalledTimes(1);
-		expect(queues.get(agent.agentId)).toHaveLength(1);
-		expect(processSpy).toHaveBeenCalledWith(agent.agentId);
+		await queue.enqueue(createJob(agent.agentId, "session-1", "2026-03-29T00:00:00.000Z", "1"));
+
+		expect(appendSpy).toHaveBeenCalled();
+		expect(appendSpy.mock.calls.map(([, event]) => event.type)).toEqual(["enqueue", "start", "complete"]);
 	});
 
 	it("compacts pending queue events during initialization", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const store = new JsonNekoclawStore();
 		const agent = store.createAgent({ slug: "recover-cat" });
-		const pendingJob: RunJob = {
-			jobId: "job-pending",
-			agentId: agent.agentId,
-			kind: "inbound",
-			sessionRecordId: "session-pending",
-			sessionKey: "agent:recover-cat:telegram:direct:1",
-			createdAt: "2026-03-29T00:00:00.000Z",
-			event: {
-				eventType: "message.created",
-				channelType: "telegram",
-				chatId: "1",
-				chatKind: "dm",
-				messageId: "m1",
-				sender: {},
-				blocks: [{ kind: "text", text: "pending" }],
-				occurredAt: "2026-03-29T00:00:00.000Z",
-			},
-		};
-		const finishedJob: RunJob = {
-			...pendingJob,
-			jobId: "job-done",
-			sessionRecordId: "session-done",
-			createdAt: "2026-03-29T00:01:00.000Z",
-		};
+		const pendingJob = createJob(agent.agentId, "session-pending", "2026-03-29T00:00:00.000Z", "1");
+		const finishedJob = createJob(agent.agentId, "session-done", "2026-03-29T00:01:00.000Z", "2");
 
 		store.appendQueueEvent(agent.agentId, {
 			type: "enqueue",
@@ -116,12 +113,12 @@ describe("job queue", () => {
 			timestamp: "2026-03-29T00:01:10.000Z",
 		});
 
-		const queues = new Map<string, RunJob[]>();
-		const processing = new Set<string>();
-		const queue = new JobQueueService(store, queues, processing, async (): Promise<WorkerResult> => ({ outbound: {} }));
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async (): Promise<WorkerResult> => ({ outbound: {} }));
 		queue.initialize();
 
-		expect(queues.get(agent.agentId)).toEqual([pendingJob]);
+		expect(queues.get(agent.agentId)?.get("session-pending")).toEqual([pendingJob]);
 		expect(store.getQueueEvents(agent.agentId)).toEqual([
 			{
 				type: "enqueue",
@@ -132,52 +129,116 @@ describe("job queue", () => {
 		]);
 	});
 
-	it("rejects enqueue when the queue reaches the depth limit", async () => {
+	it("rejects enqueue when the agent reaches the total depth limit across sessions", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const store = new JsonNekoclawStore();
-		const queues = new Map<string, RunJob[]>();
-		const processing = new Set<string>();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
 		const agent = store.createAgent({ slug: "busy-cat" });
-		const existingJobs = Array.from({ length: 50 }, (_, index) => ({
-			jobId: `job-${index}`,
-			agentId: agent.agentId,
-			kind: "inbound" as const,
-			sessionRecordId: `session-${index}`,
-			sessionKey: `agent:busy-cat:telegram:direct:${index}`,
-			createdAt: `2026-03-29T00:${String(index).padStart(2, "0")}:00.000Z`,
-			event: {
-				eventType: "message.created" as const,
-				channelType: "telegram" as const,
-				chatId: String(index),
-				chatKind: "dm" as const,
-				messageId: `m-${index}`,
-				sender: {},
-				blocks: [{ kind: "text" as const, text: "queued" }],
-				occurredAt: `2026-03-29T00:${String(index).padStart(2, "0")}:00.000Z`,
-			},
-		}));
-		queues.set(agent.agentId, existingJobs);
-		const queue = new JobQueueService(store, queues, processing, async () => ({ outbound: {} }));
+		const sessionQueues = new Map<string, RunJob[]>();
+		for (let index = 0; index < 50; index += 1) {
+			sessionQueues.set(`session-${index}`, [
+				createJob(agent.agentId, `session-${index}`, `2026-03-29T00:${String(index).padStart(2, "0")}:00.000Z`, String(index)),
+			]);
+		}
+		queues.set(agent.agentId, sessionQueues);
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async () => ({ outbound: {} }));
 
 		await expect(
-			queue.enqueue({
-				jobId: "job-overflow",
-				agentId: agent.agentId,
-				kind: "inbound",
-				sessionRecordId: "session-overflow",
-				sessionKey: "agent:busy-cat:telegram:direct:overflow",
-				createdAt: "2026-03-29T02:00:00.000Z",
-				event: {
-					eventType: "message.created",
-					channelType: "telegram",
-					chatId: "overflow",
-					chatKind: "dm",
-					messageId: "m-overflow",
-					sender: {},
-					blocks: [{ kind: "text", text: "overflow" }],
-					occurredAt: "2026-03-29T02:00:00.000Z",
-				},
-			}),
+			queue.enqueue(createJob(agent.agentId, "session-overflow", "2026-03-29T02:00:00.000Z", "overflow")),
 		).rejects.toBeInstanceOf(QueueFullError);
+	});
+
+	it("runs different sessions concurrently up to the agent concurrency limit", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const store = new JsonNekoclawStore();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const agent = store.createAgent({ slug: "parallel-cat" });
+		const gates = new Map<string, ReturnType<typeof deferred<WorkerResult>>>();
+		const starts: string[] = [];
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async (job) => {
+			starts.push(job.sessionRecordId);
+			const gate = deferred<WorkerResult>();
+			gates.set(job.sessionRecordId, gate);
+			return gate.promise;
+		});
+
+		await queue.enqueue(createJob(agent.agentId, "session-a", "2026-03-29T00:00:00.000Z", "a"));
+		await queue.enqueue(createJob(agent.agentId, "session-b", "2026-03-29T00:00:01.000Z", "b"));
+		await queue.enqueue(createJob(agent.agentId, "session-c", "2026-03-29T00:00:02.000Z", "c"));
+		await flushMicrotasks();
+
+		expect(starts).toEqual(["session-a", "session-b"]);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			queued: 1,
+			runningSessions: 2,
+			maxConcurrentSessions: 2,
+		});
+
+		gates.get("session-a")?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+
+		expect(starts).toEqual(["session-a", "session-b", "session-c"]);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			queued: 0,
+			runningSessions: 2,
+		});
+
+		gates.get("session-b")?.resolve({ outbound: {} });
+		gates.get("session-c")?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			queued: 0,
+			runningSessions: 0,
+			processing: false,
+		});
+	});
+
+	it("keeps jobs within the same session strictly serial while another session runs", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const store = new JsonNekoclawStore();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const agent = store.createAgent({ slug: "serial-cat" });
+		const gates = new Map<string, ReturnType<typeof deferred<WorkerResult>>>();
+		const starts: string[] = [];
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async (job) => {
+			starts.push(job.jobId);
+			const gate = deferred<WorkerResult>();
+			gates.set(job.jobId, gate);
+			return gate.promise;
+		});
+
+		const a1 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:00.000Z", "a");
+		const a2 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:01.000Z", "a");
+		const b1 = createJob(agent.agentId, "session-b", "2026-03-29T00:00:02.000Z", "b");
+
+		await queue.enqueue(a1);
+		await queue.enqueue(a2);
+		await queue.enqueue(b1);
+		await flushMicrotasks();
+
+		expect(starts).toEqual([a1.jobId, b1.jobId]);
+
+		gates.get(b1.jobId)?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+		expect(starts).toEqual([a1.jobId, b1.jobId]);
+
+		gates.get(a1.jobId)?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+		expect(starts).toEqual([a1.jobId, b1.jobId, a2.jobId]);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			queued: 0,
+			runningSessions: 1,
+		});
+
+		gates.get(a2.jobId)?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+		expect(queue.getStatus(agent.agentId)).toMatchObject({
+			queued: 0,
+			runningSessions: 0,
+		});
 	});
 });

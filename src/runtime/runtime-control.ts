@@ -7,8 +7,8 @@ export class RuntimeControlService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly channelPlugins: Map<string, { stop(): void }>,
-		private readonly agentQueues: Map<string, unknown[]>,
-		private readonly processingAgents: Set<string>,
+		private readonly agentQueues: Map<string, Map<string, unknown[]>>,
+		private readonly activeRunsByAgent: Map<string, Map<string, unknown>>,
 	) {}
 
 	async removeAgentRuntime(agentRef: string | Pick<AgentSpec, "agentId" | "containerName">): Promise<void> {
@@ -22,13 +22,14 @@ export class RuntimeControlService {
 			this.channelPlugins.delete(key);
 		}
 		this.agentQueues.delete(agent.agentId);
-		this.processingAgents.delete(agent.agentId);
+		this.activeRunsByAgent.delete(agent.agentId);
 		await removeAgentContainer(agent.containerName);
 		this.store.writeRuntimeState({
 			...this.store.getRuntimeState(agent.agentId),
 			agentId: agent.agentId,
 			containerStatus: "missing",
 			currentJobId: undefined,
+			activeRuns: [],
 			updatedAt: nowIso(),
 		});
 	}

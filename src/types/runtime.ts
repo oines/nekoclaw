@@ -5,8 +5,15 @@ export interface RuntimeState {
 	agentId: string;
 	containerStatus?: string;
 	currentJobId?: string;
+	activeRuns?: ActiveRunState[];
 	lastError?: string;
 	updatedAt: string;
+}
+
+export interface ActiveRunState {
+	sessionRecordId: string;
+	jobId: string;
+	startedAt: string;
 }
 
 export interface RuntimeProcessState {
@@ -46,6 +53,15 @@ export interface QueueEvent {
 	timestamp: string;
 	job?: RunJob;
 	error?: string;
+}
+
+export interface QueueStatus {
+	queued: number;
+	processing: boolean;
+	currentJobId?: string;
+	runningSessions?: number;
+	activeRuns?: ActiveRunState[];
+	maxConcurrentSessions?: number;
 }
 
 export interface PreparedPersonaContext {

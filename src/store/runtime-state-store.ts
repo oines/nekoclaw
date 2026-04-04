@@ -13,6 +13,7 @@ export class RuntimeStateStore {
 		return readJsonFile<RuntimeState>(this.paths.getRuntimeStatePath(agentId), {
 			agentId,
 			containerStatus: "missing",
+			activeRuns: [],
 			updatedAt: nowIso(),
 		});
 	}

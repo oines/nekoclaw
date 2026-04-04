@@ -19,8 +19,9 @@ import { PersonaMemoryService } from "./persona-memory.js";
 
 export class NekoclawDaemon {
 	private channelPlugins = new Map<string, ChannelPlugin>();
-	private agentQueues = new Map<string, RunJob[]>();
-	private processingAgents = new Set<string>();
+	private agentQueues = new Map<string, Map<string, RunJob[]>>();
+	private activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+	private containerStartLocks = new Map<string, Promise<string>>();
 	private syncTimer: NodeJS.Timeout | undefined;
 	private keepAliveTimer: NodeJS.Timeout | undefined;
 	private shuttingDown = false;
@@ -38,13 +39,13 @@ export class NekoclawDaemon {
 		this.outboundDispatch = new OutboundDispatchService(this.store, this.channelPlugins);
 		this.personaMemory = new PersonaMemoryService(this.store);
 		this.workerRunner = new WorkerRunnerService(this.store, this.outboundDispatch, this.channelPlugins, (agentRef) => this.startAgentContainer(agentRef));
-		this.jobQueue = new JobQueueService(this.store, this.agentQueues, this.processingAgents, (job) => this.workerRunner.runJob(job));
+		this.jobQueue = new JobQueueService(this.store, this.agentQueues, this.activeRunsByAgent, (job) => this.workerRunner.runJob(job));
 		const commands = new CommandRouterService(this.store, (agentId) => this.jobQueue.getStatus(agentId));
 		this.messageRouter = new MessageRouterService(this.store, this.channelPlugins, commands, (job) => this.jobQueue.enqueue(job));
 		this.channelRuntime = new ChannelRuntimeService(this.store, this.channelPlugins, getRuntimeKey, (agentId, channelType, event) =>
 			this.messageRouter.handleInbound(agentId, channelType, event),
 		);
-		this.runtimeControl = new RuntimeControlService(this.store, this.channelPlugins, this.agentQueues, this.processingAgents);
+		this.runtimeControl = new RuntimeControlService(this.store, this.channelPlugins, this.agentQueues, this.activeRunsByAgent);
 	}
 
 	async start(): Promise<void> {
@@ -85,7 +86,7 @@ export class NekoclawDaemon {
 			this.keepAliveTimer = undefined;
 		}
 		const deadline = Date.now() + 30_000;
-		while (this.processingAgents.size > 0 && Date.now() < deadline) {
+		while (this.jobQueue.hasAnyActiveRuns() && Date.now() < deadline) {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 		this.jobQueue.compactIdleQueues();
@@ -96,14 +97,28 @@ export class NekoclawDaemon {
 
 	async startAgentContainer(agentRef: string): Promise<string> {
 		const agent = this.store.getAgentByRef(agentRef);
-		const status = await ensureAgentContainer(agent, this.store.getWorkspaceRoot(agent.slug));
-		this.store.writeRuntimeState({
-			...this.store.getRuntimeState(agent.agentId),
-			agentId: agent.agentId,
-			containerStatus: status,
-			updatedAt: nowIso(),
-		});
-		return status;
+		const existing = this.containerStartLocks.get(agent.agentId);
+		if (existing) {
+			return existing;
+		}
+		const pending = (async () => {
+			const status = await ensureAgentContainer(agent, this.store.getWorkspaceRoot(agent.slug));
+			this.store.writeRuntimeState({
+				...this.store.getRuntimeState(agent.agentId),
+				agentId: agent.agentId,
+				containerStatus: status,
+				updatedAt: nowIso(),
+			});
+			return status;
+		})();
+		this.containerStartLocks.set(agent.agentId, pending);
+		try {
+			return await pending;
+		} finally {
+			if (this.containerStartLocks.get(agent.agentId) === pending) {
+				this.containerStartLocks.delete(agent.agentId);
+			}
+		}
 	}
 
 	async stopAgentContainer(agentRef: string): Promise<void> {
@@ -122,6 +137,7 @@ export class NekoclawDaemon {
 		this.store.writeRuntimeState({
 			...this.store.getRuntimeState(agent.agentId),
 			containerStatus: "missing",
+			activeRuns: [],
 			updatedAt: nowIso(),
 		});
 	}
@@ -166,7 +182,7 @@ export class NekoclawDaemon {
 
 	private queuePersonaBacklogSweeps(): void {
 		for (const agent of this.store.listAgents()) {
-			if (this.processingAgents.has(agent.agentId)) {
+			if (this.jobQueue.hasActiveRuns(agent.agentId)) {
 				this.personaMemory.noteDreamSkip(agent, "agent_busy");
 				continue;
 			}

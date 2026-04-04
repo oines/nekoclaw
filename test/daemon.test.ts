@@ -46,8 +46,8 @@ describe("nekoclaw daemon", () => {
 		const daemon = new NekoclawDaemon(store);
 		const daemonState = daemon as unknown as {
 			channelPlugins: Map<string, ChannelPlugin>;
-			agentQueues: Map<string, unknown[]>;
-			processingAgents: Set<string>;
+			agentQueues: Map<string, Map<string, unknown[]>>;
+			activeRunsByAgent: Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>;
 		};
 		const pluginStop = vi.fn();
 		daemonState.channelPlugins.set(
@@ -56,8 +56,11 @@ describe("nekoclaw daemon", () => {
 				stop: pluginStop,
 			} as unknown as ChannelPlugin,
 		);
-		daemonState.agentQueues.set(agent.agentId, [{ jobId: "job-1" }]);
-		daemonState.processingAgents.add(agent.agentId);
+		daemonState.agentQueues.set(agent.agentId, new Map([["session-1", [{ jobId: "job-1" }]]]));
+		daemonState.activeRunsByAgent.set(
+			agent.agentId,
+			new Map([["session-1", { sessionRecordId: "session-1", jobId: "job-1", startedAt: "2026-03-29T00:00:00.000Z" }]]),
+		);
 
 		store.deleteAgent(agent.agentId, { force: true });
 		await daemon.removeAgentRuntime(agent);
@@ -65,9 +68,10 @@ describe("nekoclaw daemon", () => {
 		expect(pluginStop).toHaveBeenCalledTimes(1);
 		expect(daemonState.channelPlugins.size).toBe(0);
 		expect(daemonState.agentQueues.has(agent.agentId)).toBe(false);
-		expect(daemonState.processingAgents.has(agent.agentId)).toBe(false);
+		expect(daemonState.activeRunsByAgent.has(agent.agentId)).toBe(false);
 		expect(docker.removeAgentContainer).toHaveBeenCalledWith(agent.containerName);
 		expect(store.getRuntimeState(agent.agentId).containerStatus).toBe("missing");
+		expect(store.getRuntimeState(agent.agentId).activeRuns).toEqual([]);
 	}, 10_000);
 
 	it("processes pending runtime removal control actions", async () => {
@@ -102,6 +106,29 @@ describe("nekoclaw daemon", () => {
 		expect(store.getRuntimeControlAction(action.requestId)?.status).toBe("completed");
 	});
 
+	it("serializes concurrent container startup for the same agent", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { NekoclawDaemon } = await import("../src/runtime/daemon.js");
+		const docker = await import("../src/runtime/docker.js");
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "startup-lock-cat" });
+		const pending = new Promise<string>((resolve) => {
+			setTimeout(() => resolve("running"), 10);
+		});
+		vi.mocked(docker.ensureAgentContainer).mockReturnValue(pending);
+
+		const daemon = new NekoclawDaemon(store);
+		const [left, right] = await Promise.all([
+			daemon.startAgentContainer(agent.agentId),
+			daemon.startAgentContainer(agent.agentId),
+		]);
+
+		expect(left).toBe("running");
+		expect(right).toBe("running");
+		expect(docker.ensureAgentContainer).toHaveBeenCalledTimes(1);
+		expect(store.getRuntimeState(agent.agentId).containerStatus).toBe("running");
+	});
+
 	it("rejects new jobs while shutting down and drains in-flight work", async () => {
 		vi.useFakeTimers();
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
@@ -111,16 +138,19 @@ describe("nekoclaw daemon", () => {
 		const agent = store.createAgent({ slug: "drain-cat" });
 		const daemon = new NekoclawDaemon(store);
 		const daemonState = daemon as unknown as {
-			processingAgents: Set<string>;
+			activeRunsByAgent: Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>;
 		};
-		daemonState.processingAgents.add(agent.agentId);
+		daemonState.activeRunsByAgent.set(
+			agent.agentId,
+			new Map([["session-1", { sessionRecordId: "session-1", jobId: "job-1", startedAt: "2026-03-29T00:00:00.000Z" }]]),
+		);
 		store.writeRuntimeProcessState({
 			pid: process.pid,
 			updatedAt: "2026-03-29T00:00:00.000Z",
 		});
 
 		setTimeout(() => {
-			daemonState.processingAgents.delete(agent.agentId);
+			daemonState.activeRunsByAgent.delete(agent.agentId);
 		}, 100);
 		const stopPromise = daemon.stop();
 		await expect(
@@ -213,7 +243,7 @@ describe("nekoclaw daemon", () => {
 		const busyAgent = store.createAgent({ slug: "busy-dream-cat" });
 		const daemon = new NekoclawDaemon(store);
 		const daemonState = daemon as unknown as {
-			processingAgents: Set<string>;
+			activeRunsByAgent: Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>;
 			personaMemory: {
 				queueBacklogSweep(agent: { agentId: string }): void;
 				queueDream(agent: { agentId: string }): void;
@@ -221,7 +251,10 @@ describe("nekoclaw daemon", () => {
 			};
 			queuePersonaBacklogSweeps(): void;
 		};
-		daemonState.processingAgents.add(busyAgent.agentId);
+		daemonState.activeRunsByAgent.set(
+			busyAgent.agentId,
+			new Map([["session-busy", { sessionRecordId: "session-busy", jobId: "job-busy", startedAt: "2026-03-29T00:00:00.000Z" }]]),
+		);
 		const backlogSpy = vi.spyOn(daemonState.personaMemory, "queueBacklogSweep");
 		const dreamSpy = vi.spyOn(daemonState.personaMemory, "queueDream");
 		const skipSpy = vi.spyOn(daemonState.personaMemory, "noteDreamSkip");

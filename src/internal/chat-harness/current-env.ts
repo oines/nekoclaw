@@ -2690,6 +2690,7 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 	const fetchRegistry = installFetchRegistry();
 	const plugins = new Map<string, ChannelPlugin>();
 	const outboundDispatch = new OutboundDispatchService(store, plugins);
+	const containerStartLocks = new Map<string, Promise<string>>();
 	const drivers = new Map<Exclude<HarnessChannel, "both">, HarnessDriver>();
 	const requestedChannels: Array<Exclude<HarnessChannel, "both">> =
 		options.channel === "both" || !options.channel ? ["telegram", "napcat"] : [options.channel];
@@ -2712,14 +2713,26 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 					plugins,
 					async (agentRef) => {
 						const current = store.getAgentByRef(agentRef);
-						return ensureAgentContainer(current, store.getWorkspaceRoot(current.slug));
+						const existing = containerStartLocks.get(current.agentId);
+						if (existing) {
+							return existing;
+						}
+						const pending = ensureAgentContainer(current, store.getWorkspaceRoot(current.slug));
+						containerStartLocks.set(current.agentId, pending);
+						try {
+							return await pending;
+						} finally {
+							if (containerStartLocks.get(current.agentId) === pending) {
+								containerStartLocks.delete(current.agentId);
+							}
+						}
 					},
 				)
 			: undefined;
 	const jobQueue = new JobQueueService(
 		store,
-		new Map<string, RunJob[]>(),
-		new Set<string>(),
+		new Map<string, Map<string, RunJob[]>>(),
+		new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>(),
 		async (job) => {
 			if (options.executeJob) {
 				const result = await options.executeJob(job, {
@@ -2862,6 +2875,7 @@ export async function runChatHarnessInCurrentEnvironment(
 			context.store.writeRuntimeState({
 				...context.store.getRuntimeState(context.agent.agentId),
 				currentJobId: undefined,
+				activeRuns: [],
 				updatedAt: nowIso(),
 			});
 			if (baselineRuntimeModels) {

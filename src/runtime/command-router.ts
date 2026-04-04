@@ -9,6 +9,7 @@ import type {
 	AgentSpec,
 	ChannelPlugin,
 	InboundMessageEvent,
+	QueueStatus,
 	ModelConfig,
 	PairRequest,
 	ReplyPayload,
@@ -30,7 +31,7 @@ type MutableGroupTriggerPlugin = ChannelPlugin & { groupTrigger?: "all" | "menti
 export class CommandRouterService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
-		private readonly getQueueStatus: (agentId: string) => { queued: number; processing: boolean; currentJobId?: string },
+		private readonly getQueueStatus: (agentId: string) => QueueStatus,
 	) {}
 
 	async handleCommand(
@@ -227,6 +228,10 @@ export class CommandRouterService {
 		isAdmin: boolean,
 	): string {
 		const queue = this.getQueueStatus(agent.agentId);
+		const activeRunsSummary =
+			queue.activeRuns && queue.activeRuns.length > 0
+				? queue.activeRuns.map((run) => `${run.sessionRecordId}:${run.jobId}`).join(", ")
+				: "none";
 		const effectiveModel = session?.modelOverride
 			? `${session.modelOverride.provider}/${session.modelOverride.modelId} (session override)`
 			: agent.provider && agent.modelId
@@ -240,7 +245,8 @@ export class CommandRouterService {
 			`Effective model: ${effectiveModel}`,
 			`Channel trigger: ${this.getChannelGroupTrigger(agent, event.channelType)}`,
 			`Session key: ${session?.sessionKey ?? "none"}`,
-			`Queue: queued=${queue.queued}, processing=${queue.processing ? "yes" : "no"}, current=${queue.currentJobId ?? "none"}`,
+			`Queue: queued=${queue.queued}, processing=${queue.processing ? "yes" : "no"}, running_sessions=${queue.runningSessions ?? (queue.processing ? 1 : 0)}, current=${queue.currentJobId ?? "none"}, limit=${queue.maxConcurrentSessions ?? 1}`,
+			`Active runs: ${activeRunsSummary}`,
 			`Compaction: enabled=${SESSION_COMPACTION_SETTINGS.enabled ? "yes" : "no"}`,
 			`Compaction reserveTokens: ${SESSION_COMPACTION_SETTINGS.reserveTokens}`,
 			`Compaction keepRecentTokens: ${SESSION_COMPACTION_SETTINGS.keepRecentTokens}`,
