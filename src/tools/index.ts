@@ -485,7 +485,7 @@ function createNoReplyTool(context: ChannelToolContext): ToolDefinition {
 		promptGuidelines: [
 			"Use this in group chats when silence is intentionally the right response.",
 			"Do not use this in DMs. Staying silent in a direct message is almost always wrong.",
-			"If you want to stay silent here and speak elsewhere, call no_reply first, then use send_message.",
+			"Calling no_reply is terminal for the current turn. Do not combine it with plain text or any other tool call.",
 		],
 		parameters: NoReplyParameters,
 		execute: async () => {

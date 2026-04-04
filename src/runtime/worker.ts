@@ -9,6 +9,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@mariozechner/pi-coding-agent";
+import type { AfterToolCallContext, AfterToolCallResult } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, UserMessage } from "@mariozechner/pi-ai";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import { summarizeBlocks } from "../messages.js";
@@ -20,6 +21,168 @@ import { createToolComposition } from "../tools/index.js";
 import type { ChannelToolAction, WorkerPayload, WorkerResult } from "../types.js";
 
 const WORKSPACE_DIR = "/workspace";
+const TERMINAL_NO_REPLY_ERROR_PREFIX = "__NEKOCLAW_TERMINAL_NO_REPLY__:";
+const TERMINAL_NO_REPLY_STOP_REASON = "no_reply";
+
+class TerminalNoReplyAbort extends Error {
+	readonly toolCallId: string;
+
+	constructor(toolCallId: string) {
+		super(`${TERMINAL_NO_REPLY_ERROR_PREFIX}${toolCallId}`);
+		this.name = "TerminalNoReplyAbort";
+		this.toolCallId = toolCallId;
+	}
+}
+
+type AfterToolCallHandler = (
+	context: AfterToolCallContext,
+	signal?: AbortSignal,
+) => Promise<AfterToolCallResult | undefined>;
+
+type MutableSessionState = {
+	messages: Message[];
+	error?: string;
+};
+
+type SessionMessageEntryLike = {
+	type: "message";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	message: Message;
+};
+
+type SessionManagerInternals = {
+	fileEntries?: Array<{ type: string; id?: string } | SessionMessageEntryLike>;
+	byId?: Map<string, { type: string; id?: string }>;
+	leafId?: string | null;
+	_buildIndex?: () => void;
+	_rewriteFile?: () => void;
+};
+
+function getTerminalNoReplyToolCallId(errorMessage: string | undefined): string | undefined {
+	if (!errorMessage?.startsWith(TERMINAL_NO_REPLY_ERROR_PREFIX)) {
+		return undefined;
+	}
+	const toolCallId = errorMessage.slice(TERMINAL_NO_REPLY_ERROR_PREFIX.length).trim();
+	return toolCallId || undefined;
+}
+
+function findNoReplyToolCallId(message: Message | undefined): string | undefined {
+	if (!message || message.role !== "assistant") {
+		return undefined;
+	}
+	for (const block of message.content) {
+		if (block.type === "toolCall" && block.name === "no_reply") {
+			return block.id;
+		}
+	}
+	return undefined;
+}
+
+function isTerminalNoReplyErrorMessage(message: Message | undefined): boolean {
+	return (
+		message?.role === "assistant" &&
+		message.stopReason === "error" &&
+		typeof message.errorMessage === "string" &&
+		message.errorMessage.startsWith(TERMINAL_NO_REPLY_ERROR_PREFIX)
+	);
+}
+
+function removeTerminalNoReplyArtifactsFromState(
+	state: MutableSessionState,
+	explicitToolCallId?: string,
+): string | undefined {
+	if (state.messages.length === 0) {
+		return undefined;
+	}
+
+	if (isTerminalNoReplyErrorMessage(state.messages[state.messages.length - 1])) {
+		state.messages.pop();
+	}
+
+	const tail = state.messages[state.messages.length - 1];
+	const toolCallId = findNoReplyToolCallId(tail);
+	if (!toolCallId) {
+		return explicitToolCallId;
+	}
+	if (explicitToolCallId && toolCallId !== explicitToolCallId) {
+		return explicitToolCallId;
+	}
+	state.messages.pop();
+	return toolCallId;
+}
+
+function removeTerminalNoReplyArtifactsFromSessionFile(
+	sessionManager: SessionManager,
+	explicitToolCallId?: string,
+): void {
+	const internals = sessionManager as unknown as SessionManagerInternals;
+	const fileEntries = internals.fileEntries;
+	if (!Array.isArray(fileEntries) || fileEntries.length === 0) {
+		return;
+	}
+
+	const tail = fileEntries[fileEntries.length - 1];
+	if (tail?.type !== "message") {
+		return;
+	}
+
+	const entry = tail as SessionMessageEntryLike;
+	const toolCallId = findNoReplyToolCallId(entry.message);
+	if (!toolCallId) {
+		return;
+	}
+	if (explicitToolCallId && toolCallId !== explicitToolCallId) {
+		return;
+	}
+
+	fileEntries.pop();
+	if (typeof internals._buildIndex === "function") {
+		internals._buildIndex();
+	} else {
+		const byId = new Map<string, { type: string; id?: string }>();
+		let leafId: string | null = null;
+		for (const fileEntry of fileEntries) {
+			if (fileEntry.type === "session" || !fileEntry.id) {
+				continue;
+			}
+			byId.set(fileEntry.id, fileEntry);
+			leafId = fileEntry.id;
+		}
+		internals.byId = byId;
+		internals.leafId = leafId;
+	}
+	if (typeof internals._rewriteFile === "function") {
+		internals._rewriteFile();
+	}
+}
+
+function installTerminalNoReplyHook(session: Awaited<ReturnType<typeof createAgentSession>>["session"]): void {
+	const agent = session.agent as unknown as { _afterToolCall?: AfterToolCallHandler };
+	const previousAfterToolCall = agent._afterToolCall;
+	session.agent.setAfterToolCall(async (context, signal) => {
+		const afterResult = previousAfterToolCall ? await previousAfterToolCall(context, signal) : undefined;
+		if (context.toolCall.name === "no_reply" && !context.isError) {
+			throw new TerminalNoReplyAbort(context.toolCall.id);
+		}
+		return afterResult;
+	});
+}
+
+function finalizeTerminalNoReply(
+	session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+	sessionManager: SessionManager,
+): void {
+	const state = session.state as MutableSessionState;
+	const tail = state.messages[state.messages.length - 1];
+	const terminalToolCallId = isTerminalNoReplyErrorMessage(tail)
+		? getTerminalNoReplyToolCallId((tail as AssistantMessage).errorMessage)
+		: undefined;
+	const removedToolCallId = removeTerminalNoReplyArtifactsFromState(state, terminalToolCallId);
+	removeTerminalNoReplyArtifactsFromSessionFile(sessionManager, removedToolCallId ?? terminalToolCallId);
+	state.error = undefined;
+}
 
 export function collectPromptImages(
 	payload: WorkerPayload,
@@ -129,6 +292,7 @@ ${payload.personaContext.sceneObservations}`
 - Use the \`session_status\` tool when you need to confirm current-session capabilities before choosing an action.
 - Use \`list_contacts\`, \`list_groups\`, \`get_group_members\`, and \`get_contact_detail\` only to inspect the runtime-known directory before proactive outreach.
 - Use the \`no_reply\` tool only when silence is intentionally the best outcome.
+- If you call \`no_reply\`, that turn ends immediately. Do not combine it with plain text or any other tool calls.
 - Routing examples:
 - Reply to the current user normally -> output plain text.
 - Reply to a specific earlier message in this same chat -> \`message(action='reply', ...)\`.
@@ -345,6 +509,7 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 	});
 	overrideSessionPrompt(session, finalSystemPrompt);
 	await bindPrintModeExtensions(session);
+	installTerminalNoReplyHook(session);
 
 	// Get images from current message or recent history
 	const recentMessages = (session.state.messages || []) as (UserMessage | AssistantMessage)[];
@@ -369,16 +534,23 @@ export async function runWorker(payload: WorkerPayload): Promise<WorkerResult> {
 
 	await session.prompt(finalUserPrompt, images.length > 0 ? { images } : undefined);
 
+	const suppressDefaultReply = toolActions.some((action) => action.kind === "no_reply");
+	if (suppressDefaultReply) {
+		finalizeTerminalNoReply(session, sessionManager);
+		return {
+			outbound: {},
+			toolActions: toolActions.filter((action) => action.kind === "no_reply"),
+			stopReason: TERMINAL_NO_REPLY_STOP_REASON,
+		};
+	}
+
 	const responseText = getLastAssistantText(payload, session.state);
 	const lastMessage = session.state.messages[session.state.messages.length - 1];
 	const assistant = lastMessage?.role === "assistant" ? (lastMessage as AssistantMessage) : undefined;
-	const suppressDefaultReply = toolActions.some((action) => action.kind === "no_reply");
 	return {
-		outbound: suppressDefaultReply
-			? {}
-			: {
-					text: responseText,
-				},
+		outbound: {
+			text: responseText,
+		},
 		toolActions,
 		stopReason: assistant?.stopReason,
 		errorMessage: assistant?.errorMessage,
