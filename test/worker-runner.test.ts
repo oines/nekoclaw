@@ -1,9 +1,104 @@
-import { describe, expect, it } from "vitest";
-import type { WorkerResult } from "../src/types.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { appendJsonLine } from "../src/store/fs.js";
+import { buildBotOutboundSessionLogEntry, buildInboundSessionLogEntry } from "../src/runtime/session-log.js";
+import type { InboundMessageEvent, WorkerResult } from "../src/types.js";
+
+function createEvent(input: {
+	channelType: "telegram" | "napcat";
+	chatId: string;
+	chatKind: "dm" | "group";
+	messageId: string;
+	senderId: string;
+	senderName?: string;
+	text: string;
+	occurredAt: string;
+	chatTitle?: string;
+}): InboundMessageEvent {
+	return {
+		eventType: "message.created",
+		channelType: input.channelType,
+		chatId: input.chatId,
+		chatKind: input.chatKind,
+		chatTitle: input.chatTitle,
+		messageId: input.messageId,
+		sender: { externalId: input.senderId, displayName: input.senderName },
+		blocks: [{ kind: "text", text: input.text }],
+		occurredAt: input.occurredAt,
+	};
+}
 
 describe("buildFormationTurnTranscript", () => {
-	it("includes the inbound turn plus all visible current-session bot outputs", async () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "nekoclaw-worker-runner-"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("builds a recent chronological timeline from session log entries without duplicating current bot outputs", async () => {
 		const { buildFormationTurnTranscript } = await import("../src/runtime/worker-runner.js");
+
+		const logPath = join(tempDir, "log.jsonl");
+		appendJsonLine(
+			logPath,
+			buildInboundSessionLogEntry(
+				createEvent({
+					channelType: "telegram",
+					chatId: "111",
+					chatKind: "dm",
+					messageId: "m0",
+					senderId: "u2",
+					senderName: "Bob",
+					text: "昨天那个数据库别动",
+					occurredAt: "2026-04-04T00:00:00.000Z",
+				}),
+			),
+		);
+		appendJsonLine(
+			logPath,
+			buildBotOutboundSessionLogEntry({
+				timestamp: "2026-04-04T00:00:01.000Z",
+				session: {
+					sessionRecordId: "session-1",
+					channelType: "telegram",
+					externalConversationId: "111",
+					chatKind: "dm",
+				},
+				payload: { text: "我先不重启，等你确认" },
+				source: "tool.reply",
+			}),
+		);
+		const currentEvent = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m1",
+			senderId: "u1",
+			senderName: "Alice",
+			text: "现在可以把结果总结一下吗",
+			occurredAt: "2026-04-04T00:00:02.000Z",
+		});
+		appendJsonLine(logPath, buildInboundSessionLogEntry(currentEvent));
+		appendJsonLine(
+			logPath,
+			buildBotOutboundSessionLogEntry({
+				timestamp: "2026-04-04T00:00:03.000Z",
+				session: {
+					sessionRecordId: "session-1",
+					channelType: "telegram",
+					externalConversationId: "111",
+					chatKind: "dm",
+				},
+				payload: { text: "final visible reply", attachments: [{ kind: "file", name: "summary.txt" }] },
+				source: "outbound",
+			}),
+		);
 
 		const result: WorkerResult = {
 			outbound: {
@@ -14,24 +109,7 @@ describe("buildFormationTurnTranscript", () => {
 				{
 					kind: "reply",
 					payload: {
-						text: "here is your file",
-						attachments: [
-							{ kind: "image", name: "photo.png", mimeType: "image/png" },
-							{ kind: "file", name: "report.pdf", mimeType: "application/pdf" },
-						],
-					},
-				},
-				{
-					kind: "send",
-					payload: {
-						attachments: [{ kind: "image", name: "banner.jpg" }],
-					},
-				},
-				{
-					kind: "send_targeted",
-					target: "telegram:dm:111",
-					payload: {
-						text: "same session targeted note",
+						text: "我先不重启，等你确认",
 					},
 				},
 			],
@@ -39,18 +117,12 @@ describe("buildFormationTurnTranscript", () => {
 
 		const transcript = buildFormationTurnTranscript(
 			{
-				event: {
-					eventType: "message.created",
-					channelType: "telegram",
-					chatId: "111",
-					chatKind: "dm",
-					messageId: "m1",
-					sender: { externalId: "u1", displayName: "Alice" },
-					blocks: [{ kind: "text", text: "please remember this promise" }],
-					occurredAt: "2026-04-04T00:00:00.000Z",
-				},
-			},
+				getSessionLogPath: () => logPath,
+			} as any,
+			{ slug: "timeline-cat" } as any,
+			{ event: currentEvent },
 			{
+				sessionRecordId: "session-1",
 				channelType: "telegram",
 				chatKind: "dm",
 				externalConversationId: "111",
@@ -58,18 +130,46 @@ describe("buildFormationTurnTranscript", () => {
 			result,
 		);
 
-		expect(transcript).toContain("User:\n- Text: please remember this promise");
-		expect(transcript).toContain("Bot:\n- Text: here is your file");
-		expect(transcript).toContain("- Image: photo.png");
-		expect(transcript).toContain("- File: report.pdf");
-		expect(transcript).toContain("Bot:\n- Image: banner.jpg");
-		expect(transcript).toContain("Bot:\n- Text: same session targeted note");
-		expect(transcript).toContain("Bot:\n- Text: final visible reply");
+		expect(transcript).toContain("[2026-04-04T00:00:00.000Z] Observed (telegram:u2 | Bob):");
+		expect(transcript).toContain("昨天那个数据库别动");
+		expect(transcript).toContain("[2026-04-04T00:00:01.000Z] Bot (source=tool.reply):");
+		expect(transcript).toContain("[2026-04-04T00:00:02.000Z] User (telegram:u1 | Alice):");
+		expect(transcript).toContain("[2026-04-04T00:00:03.000Z] Bot (source=outbound):");
 		expect(transcript).toContain("- File: summary.txt");
+		expect(transcript.match(/final visible reply/g)).toHaveLength(1);
+		expect(transcript.match(/我先不重启，等你确认/g)).toHaveLength(1);
 	});
 
-	it("falls back to mimeType and ignores non-current-session visible actions", async () => {
+	it("ignores slash commands and non-current-session visible actions, and falls back to current run bot outputs when the log has not recorded them yet", async () => {
 		const { buildFormationTurnTranscript } = await import("../src/runtime/worker-runner.js");
+
+		const logPath = join(tempDir, "log.jsonl");
+		appendJsonLine(
+			logPath,
+			buildInboundSessionLogEntry(
+				createEvent({
+					channelType: "telegram",
+					chatId: "111",
+					chatKind: "dm",
+					messageId: "cmd-1",
+					senderId: "u1",
+					senderName: "Alice",
+					text: "/help",
+					occurredAt: "2026-04-04T00:00:00.000Z",
+				}),
+			),
+		);
+		const currentEvent = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m1",
+			senderId: "u1",
+			senderName: "Alice",
+			text: "hello",
+			occurredAt: "2026-04-04T00:00:01.000Z",
+		});
+		appendJsonLine(logPath, buildInboundSessionLogEntry(currentEvent));
 
 		const result: WorkerResult = {
 			outbound: {},
@@ -93,18 +193,12 @@ describe("buildFormationTurnTranscript", () => {
 
 		const transcript = buildFormationTurnTranscript(
 			{
-				event: {
-					eventType: "message.created",
-					channelType: "telegram",
-					chatId: "111",
-					chatKind: "dm",
-					messageId: "m1",
-					sender: { externalId: "u1" },
-					blocks: [{ kind: "text", text: "hello" }],
-					occurredAt: "2026-04-04T00:00:00.000Z",
-				},
-			},
+				getSessionLogPath: () => logPath,
+			} as any,
+			{ slug: "timeline-cat" } as any,
+			{ event: currentEvent },
 			{
+				sessionRecordId: "session-1",
 				channelType: "telegram",
 				chatKind: "dm",
 				externalConversationId: "111",
@@ -112,41 +206,10 @@ describe("buildFormationTurnTranscript", () => {
 			result,
 		);
 
+		expect(transcript).toContain("[2026-04-04T00:00:01.000Z] User (telegram:u1 | Alice):");
 		expect(transcript).toContain("- File: application/zip");
+		expect(transcript).toContain("source=current_run_fallback");
+		expect(transcript).not.toContain("/help");
 		expect(transcript).not.toContain("other room");
-	});
-
-	it("does not duplicate the final outbound turn when it matches a current-session tool action", async () => {
-		const { buildFormationTurnTranscript } = await import("../src/runtime/worker-runner.js");
-
-		const result: WorkerResult = {
-			outbound: { text: "hello" },
-			toolActions: [
-				{ kind: "reply", payload: { text: "hello" } },
-			],
-		};
-
-		const transcript = buildFormationTurnTranscript(
-			{
-				event: {
-					eventType: "message.created",
-					channelType: "telegram",
-					chatId: "111",
-					chatKind: "dm",
-					messageId: "m1",
-					sender: { externalId: "u1" },
-					blocks: [{ kind: "text", text: "hello" }],
-					occurredAt: "2026-04-04T00:00:00.000Z",
-				},
-			},
-			{
-				channelType: "telegram",
-				chatKind: "dm",
-				externalConversationId: "111",
-			},
-			result,
-		);
-
-		expect(transcript.match(/Bot:\n- Text: hello/g)).toHaveLength(1);
 	});
 });

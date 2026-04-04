@@ -32,6 +32,12 @@ describe("OutboundDispatchService path rebasing", () => {
 		getChannel: vi.fn((_agentId: string, channelType: ChannelType) => ({ type: channelType })),
 		audit: vi.fn(),
 		getAgentByRef: vi.fn().mockReturnValue(mockAgent),
+		findSessionByAddress: vi.fn(),
+		services: {
+			sessions: {
+				appendSessionLog: vi.fn(),
+			},
+		},
 	};
 
 	const mockPluginActions = {
@@ -83,6 +89,7 @@ describe("OutboundDispatchService path rebasing", () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		mockStore.findSessionByAddress.mockReturnValue(undefined);
 	});
 
 	it("rebases container paths to host paths in sendToSession", async () => {
@@ -101,6 +108,19 @@ describe("OutboundDispatchService path rebasing", () => {
 
 		const call = (mockPlugin.outbound.send as any).mock.calls[0][0];
 		expect(call.payload.attachments[0].filePath).toBe("/host/workspaces/test-agent/attachments/pic.jpg");
+		expect(mockStore.services.sessions.appendSessionLog).toHaveBeenCalledWith(
+			mockAgent.agentId,
+			mockSession.sessionRecordId,
+			expect.objectContaining({
+				type: "bot.outbound",
+				chatId: mockSession.externalConversationId,
+				chatKind: mockSession.chatKind,
+				source: "outbound",
+				payload: expect.objectContaining({
+					text: "here is a file",
+				}),
+			}),
+		);
 	});
 
 	it("rebases container paths in executeToolActions (send and reply)", async () => {
@@ -137,10 +157,32 @@ describe("OutboundDispatchService path rebasing", () => {
 				}),
 			}),
 		);
+		expect(mockStore.services.sessions.appendSessionLog).toHaveBeenCalledTimes(2);
+		expect(mockStore.services.sessions.appendSessionLog).toHaveBeenNthCalledWith(
+			1,
+			mockAgent.agentId,
+			mockSession.sessionRecordId,
+			expect.objectContaining({ type: "bot.outbound", source: "tool.send" }),
+		);
+		expect(mockStore.services.sessions.appendSessionLog).toHaveBeenNthCalledWith(
+			2,
+			mockAgent.agentId,
+			mockSession.sessionRecordId,
+			expect.objectContaining({ type: "bot.outbound", source: "tool.reply" }),
+		);
 	});
 
 	it("dispatches send_targeted to the plugin that matches the explicit target ref", async () => {
 		const service = new OutboundDispatchService(mockStore as any, plugins);
+		const targetSession = {
+			...mockSession,
+			sessionRecordId: "session-2",
+			channelType: "napcat" as const,
+			externalConversationId: "8888",
+			chatKind: "group" as const,
+			sessionKey: "agent:test-agent:napcat:group:8888",
+		};
+		mockStore.findSessionByAddress.mockReturnValue(targetSession);
 		const actions: any[] = [
 			{
 				kind: "send_targeted",
@@ -163,6 +205,16 @@ describe("OutboundDispatchService path rebasing", () => {
 			},
 		});
 		expect(mockPluginActions.send).not.toHaveBeenCalled();
+		expect(mockStore.services.sessions.appendSessionLog).toHaveBeenCalledWith(
+			mockAgent.agentId,
+			"session-2",
+			expect.objectContaining({
+				type: "bot.outbound",
+				source: "tool.send_targeted",
+				chatId: "8888",
+				chatKind: "group",
+			}),
+		);
 	});
 
 	it("leaves non-container paths and URLs untouched", async () => {

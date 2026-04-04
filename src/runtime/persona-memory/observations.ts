@@ -81,8 +81,12 @@ function toExposedChannelType(channelType: string): string {
 export function formatObservationLine(event: InboundMessageEvent): string {
 	const speaker = `${toExposedChannelType(event.channelType)}:${event.sender.externalId ?? event.chatId}`;
 	const displayName = event.sender.displayName ? ` ${event.sender.displayName}` : "";
+	const sceneLabel =
+		event.chatKind === "group" && event.chatTitle?.trim()
+			? ` | scene=${event.chatTitle.trim()}`
+			: "";
 	const content = collectEventText(event).replace(/\n+/g, " ").trim();
-	return `[${event.occurredAt}] ${speaker}${displayName}: ${content}`;
+	return `[${event.occurredAt}] ${speaker}${displayName}${sceneLabel}: ${content}`;
 }
 
 export function parseObservationTimestamp(line: string): number | undefined {

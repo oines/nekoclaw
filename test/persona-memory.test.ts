@@ -115,9 +115,11 @@ describe("persona memory service", () => {
 
 		expect(context.sceneObservations).toContain("支付接口又挂了");
 		expect(context.sceneObservations).toContain("我看看日志，应该是超时");
+		expect(context.sceneObservations).toContain("scene=支付群");
 		expect(context.indexMarkdown).toBe("");
 		expect(context.selectedMemoryMarkdowns).toEqual([]);
 		const observationPath = store.getPersonaObservationPath(agent.slug, "telegram-group-1001");
+		expect(readFileSync(observationPath, "utf-8")).toContain("scene=支付群");
 		expect(readFileSync(observationPath, "utf-8")).toContain("群里刚才在聊什么？");
 	});
 
@@ -666,7 +668,7 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			turnTranscript: "User:\n- Text: 我叫张三，在做一个 GPU 租赁平台\n\nBot:\n- Text: 记得，你之前说在做 GPU 租赁平台。",
+			recentTimeline: "[2026-04-01T00:00:00.000Z] User (telegram:999 | 张三):\n- Text: 我叫张三，在做一个 GPU 租赁平台\n\n[2026-04-01T00:00:01.000Z] Bot:\n- Text: 记得，你之前说在做 GPU 租赁平台。",
 			personaContext: context,
 		});
 		await waitForBackgroundWork();
@@ -742,7 +744,7 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			turnTranscript: "User:\n- Text: 我叫张三，在做一个 GPU 租赁平台\n\nBot:\n- Text: 记得，你之前说在做 GPU 租赁平台。",
+			recentTimeline: "[2026-04-01T00:00:00.000Z] User (telegram:999 | 张三):\n- Text: 我叫张三，在做一个 GPU 租赁平台\n\n[2026-04-01T00:00:01.000Z] Bot:\n- Text: 记得，你之前说在做 GPU 租赁平台。",
 			personaContext: context,
 		});
 		await waitForBackgroundWork();
@@ -957,7 +959,7 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			turnTranscript: "User:\n- Text: 测试共享队列\n\nBot:\n- Text: 好的",
+			recentTimeline: "[2026-04-01T00:00:00.000Z] User (telegram:999 | 用户):\n- Text: 测试共享队列\n\n[2026-04-01T00:00:01.000Z] Bot:\n- Text: 好的",
 			personaContext: { indexMarkdown: "", selectedMemoryMarkdowns: [], sceneObservations: "" },
 		});
 		personaMemory.queueDream(agent, { force: true });
@@ -1155,7 +1157,7 @@ describe("persona memory service", () => {
 		expect(content).not.toContain("napcat:");
 	});
 
-	it("formation prompt includes the full run transcript and observation format hint", async () => {
+	it("formation prompt includes the recent timeline and observation format hint", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
 
@@ -1205,19 +1207,29 @@ describe("persona memory service", () => {
 			agent,
 			session,
 			event,
-			turnTranscript: "User:\n- Text: UNIQUE_INBOUND_TEXT_XYZ\n\nBot:\n- Text: bot reply here\n\nBot:\n- Text: second promise",
+			recentTimeline: "[2026-04-01T00:00:00.000Z] User (telegram:999 | 用户):\n- Text: UNIQUE_INBOUND_TEXT_XYZ\n\n[2026-04-01T00:00:01.000Z] Bot:\n- Text: bot reply here\n\n[2026-04-01T00:00:02.000Z] Bot:\n- Text: second promise",
 			personaContext: context,
 		});
 		await waitForBackgroundWork();
 
 		expect(capturedPrompt).not.toContain("Current inbound message");
 		expect(capturedPrompt).toContain("Task: inspect the temporary persona workspace and update memory for this scene.");
+		expect(capturedPrompt).toContain("Scene context for this run:");
+		expect(capturedPrompt).toContain("- Channel: telegram");
+		expect(capturedPrompt).toContain("- Chat kind: dm");
+		expect(capturedPrompt).toContain("- Chat id: 999");
+		expect(capturedPrompt).toContain("- Current sender id: 999");
+		expect(capturedPrompt).toContain("- Current sender display name: 用户");
+		expect(capturedPrompt).toContain("This scene is a direct conversation with 用户.");
 		expect(capturedPrompt).toContain("Observation line format:");
-		expect(capturedPrompt).toContain("Full visible transcript for this run:");
+		expect(capturedPrompt).toContain("scene=Chat Title");
+		expect(capturedPrompt).toContain("Recent visible timeline for this scene:");
 		expect(capturedPrompt).toContain("UNIQUE_INBOUND_TEXT_XYZ");
 		expect(capturedPrompt).toContain("bot reply here");
 		expect(capturedPrompt).toContain("second promise");
-		expect(capturedPrompt).toContain("Bot-visible commitments and obligations stated in this run transcript");
+		expect(capturedPrompt).toContain("Timeline semantics: User is the current triggering message");
+		expect(capturedPrompt).toContain("Observed lines are evidence only");
+		expect(capturedPrompt).toContain("Bot-visible commitments and obligations stated in Bot turns");
 		expect(capturedPrompt).toContain("Long-term defaults and standing preferences");
 		expect(capturedPrompt).toContain("User identity corrections and links");
 		expect(capturedPrompt).toContain("Update index.md summaries so the worker can notice that a detailed file is worth opening later.");
@@ -1225,5 +1237,74 @@ describe("persona memory service", () => {
 		expect(capturedPrompt).toContain("If this run does not change any memory files, you must still call persona_finalize exactly once with consumeObservationLines=0.");
 		expect(capturedPrompt).toContain("De-prioritize or omit:");
 		expect(capturedPrompt).not.toContain("Ensure every people/scenes file you touch has YAML frontmatter");
+	});
+
+	it("includes group title and current sender identity in the formation prompt for group scenes", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "formation-scene-name-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "1043518871",
+			chatKind: "group",
+			chatTitle: "运维总群",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+
+		let event = createEvent({
+			channelType: "napcat",
+			chatId: "1043518871",
+			chatKind: "group",
+			chatTitle: "运维总群",
+			messageId: "group-1",
+			senderId: "3184675714",
+			senderName: "张三",
+			text: "今晚先别重启，等我看监控",
+			occurredAt: "2026-04-01T00:00:00.000Z",
+		});
+		personaMemory.recordInbound(agent.agentId, session, event);
+		for (let index = 2; index <= 50; index += 1) {
+			event = createEvent({
+				channelType: "napcat",
+				chatId: "1043518871",
+				chatKind: "group",
+				chatTitle: "运维总群",
+				messageId: `group-${index}`,
+				senderId: "3184675714",
+				senderName: "张三",
+				text: `运维群消息 ${index}`,
+				occurredAt: `2026-04-01T00:${String(index - 1).padStart(2, "0")}:00.000Z`,
+			});
+			personaMemory.recordInbound(agent.agentId, session, event);
+		}
+		const context = await personaMemory.buildPreparedContext(agent, session, event);
+
+		let capturedPrompt = "";
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			const maintenanceInput = input as { prompt?: string };
+			capturedPrompt = maintenanceInput.prompt ?? "";
+			return { finalize: { consumeObservationLines: 1, summary: "ok" }, touchedPaths: [], deletedPaths: [] };
+		});
+
+		personaMemory.scheduleFormation({
+			agent,
+			session,
+			event,
+			recentTimeline: "[2026-04-01T00:00:00.000Z] User (telegram:999 | 用户):\n- Text: 今晚先别重启，等我看监控\n\n[2026-04-01T00:00:01.000Z] Bot:\n- Text: 好，我先不动。",
+			personaContext: context,
+		});
+		await waitForBackgroundWork();
+
+		expect(capturedPrompt).toContain("Scene context for this run:");
+		expect(capturedPrompt).toContain("- Channel: qq");
+		expect(capturedPrompt).toContain("- Chat kind: group");
+		expect(capturedPrompt).toContain("- Chat id: 1043518871");
+		expect(capturedPrompt).toContain("- Chat title: 运维总群");
+		expect(capturedPrompt).toContain("- Current sender id: 3184675714");
+		expect(capturedPrompt).toContain("- Current sender display name: 张三");
+		expect(capturedPrompt).not.toContain("This scene is a direct conversation with");
 	});
 	});

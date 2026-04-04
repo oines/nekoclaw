@@ -1,7 +1,8 @@
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
-import { hasOutboundContent, summarizeBlocks } from "../messages.js";
+import { hasOutboundContent } from "../messages.js";
 import { MODEL_ENV_MAP } from "../model/provider-key.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
+import { readJsonLines } from "../store/fs.js";
 import type { AgentSpec, ChannelPlugin, ReplyPayload, RunJob, SessionRecord, WorkerPayload, WorkerResult } from "../types.js";
 import { runWorkerInContainer } from "./docker.js";
 import { OutboundDispatchService } from "./outbound-dispatch.js";
@@ -9,24 +10,7 @@ import { PersonaMemoryService } from "./persona-memory.js";
 import { parseTargetRef } from "./runtime-directory.js";
 import { RuntimeDirectoryService } from "./runtime-directory.js";
 import { getRuntimeKey } from "./runtime-key.js";
-
-function summarizeReplyPayload(payload: ReplyPayload): string[] {
-	const lines: string[] = [];
-	if (payload.text?.trim()) {
-		lines.push(`- Text: ${payload.text.trim()}`);
-	}
-	for (const att of payload.attachments ?? []) {
-		lines.push(`- ${att.kind === "image" ? "Image" : "File"}: ${att.name ?? att.mimeType ?? "attachment"}`);
-	}
-	return lines;
-}
-
-function formatTranscriptTurn(speaker: string, lines: string[]): string | undefined {
-	if (lines.length === 0) {
-		return undefined;
-	}
-	return `${speaker}:\n${lines.join("\n")}`;
-}
+import { buildFormationTimeline, isBotOutboundSessionLogEntry, type SessionLogEntry, summarizeReplyPayload } from "./session-log.js";
 
 function isCurrentSessionTarget(target: string, session: Pick<SessionRecord, "channelType" | "chatKind" | "externalConversationId">): boolean {
 	const parsed = parseTargetRef(target);
@@ -41,16 +25,13 @@ function isCurrentSessionTarget(target: string, session: Pick<SessionRecord, "ch
 }
 
 export function buildFormationTurnTranscript(
+	store: Pick<JsonNekoclawStore, "getSessionLogPath">,
+	agent: Pick<AgentSpec, "slug">,
 	job: Pick<RunJob, "event">,
-	session: Pick<SessionRecord, "channelType" | "chatKind" | "externalConversationId">,
+	session: Pick<SessionRecord, "sessionRecordId" | "channelType" | "chatKind" | "externalConversationId">,
 	result: WorkerResult,
 ): string {
-	const transcriptTurns: string[] = [];
-	const userTurn = formatTranscriptTurn("User", summarizeBlocks(job.event.blocks));
-	if (userTurn) {
-		transcriptTurns.push(userTurn);
-	}
-
+	const fallbackBotPayloads: ReplyPayload[] = [];
 	for (const action of result.toolActions ?? []) {
 		if (action.kind !== "send" && action.kind !== "reply" && action.kind !== "send_targeted") {
 			continue;
@@ -58,20 +39,33 @@ export function buildFormationTurnTranscript(
 		if (action.kind === "send_targeted" && !isCurrentSessionTarget(action.target, session)) {
 			continue;
 		}
-		const botTurn = formatTranscriptTurn("Bot", summarizeReplyPayload(action.payload));
-		if (botTurn) {
-			transcriptTurns.push(botTurn);
+		if (summarizeReplyPayload(action.payload).length > 0) {
+			fallbackBotPayloads.push(action.payload);
 		}
 	}
-
-	const outboundTurn = hasOutboundContent(result.outbound)
-		? formatTranscriptTurn("Bot", summarizeReplyPayload(result.outbound))
-		: undefined;
-	if (outboundTurn && !transcriptTurns.includes(outboundTurn)) {
-		transcriptTurns.push(outboundTurn);
+	if (hasOutboundContent(result.outbound)) {
+		fallbackBotPayloads.push(result.outbound);
 	}
-
-	return transcriptTurns.join("\n\n");
+	const logEntries = readJsonLines<SessionLogEntry>(store.getSessionLogPath(agent.slug, session.sessionRecordId));
+	const filteredEntries = logEntries.filter((entry) => {
+		if (isBotOutboundSessionLogEntry(entry)) {
+			return (
+				entry.channelType === session.channelType &&
+				entry.chatKind === session.chatKind &&
+				entry.chatId === session.externalConversationId
+			);
+		}
+		return (
+			entry.channelType === job.event.channelType &&
+			entry.chatKind === job.event.chatKind &&
+			entry.chatId === job.event.chatId
+		);
+	});
+	return buildFormationTimeline({
+		logEntries: filteredEntries,
+		currentEvent: job.event,
+		fallbackBotPayloads,
+	});
 }
 
 function parseWorkerResult(stdout: string): WorkerResult {
@@ -145,12 +139,12 @@ export class WorkerRunnerService {
 			if (hasOutboundContent(result.outbound)) {
 				await this.outbound.sendToSession(agent, session, job.event, result.outbound);
 			}
-			const turnTranscript = buildFormationTurnTranscript(job, session, result);
+			const recentTimeline = buildFormationTurnTranscript(this.store, agent, job, session, result);
 			this.personaMemory.scheduleFormation({
 				agent,
 				session,
 				event: job.event,
-				turnTranscript,
+				recentTimeline,
 				personaContext,
 				effectiveModel,
 			});

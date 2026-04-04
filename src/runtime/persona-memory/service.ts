@@ -67,7 +67,7 @@ export class PersonaMemoryService {
 		agent: AgentSpec;
 		session: SessionRecord;
 		event: InboundMessageEvent;
-		turnTranscript: string;
+		recentTimeline: string;
 		personaContext: PreparedPersonaContext;
 		effectiveModel?: WorkerPayload["effectiveModel"];
 	}): void {
@@ -294,7 +294,7 @@ export class PersonaMemoryService {
 		agent: AgentSpec;
 		session: SessionRecord;
 		event: InboundMessageEvent;
-		turnTranscript: string;
+		recentTimeline: string;
 		personaContext: PreparedPersonaContext;
 		effectiveModel?: WorkerPayload["effectiveModel"];
 	}): Promise<void> {
@@ -322,12 +322,18 @@ export class PersonaMemoryService {
 					allowDeletes: false,
 					prompt: buildFormationTurnPrompt({
 						sceneRef,
-						turnTranscript: input.turnTranscript,
+						recentTimeline: input.recentTimeline,
 						sceneMemoryPath: buildSceneMemoryPath(sceneRef),
 						memoryManifestText: snapshot.memoryManifestText,
+						channelType: input.session.channelType,
+						chatKind: input.session.chatKind,
+						chatId: input.session.externalConversationId,
+						chatTitle: input.session.chatTitle ?? input.event.chatTitle,
+						senderId: input.event.sender.externalId,
+						senderDisplayName: input.event.sender.displayName,
 					}),
-					resolveModel: this.resolveModel.bind(this),
-				});
+						resolveModel: this.resolveModel.bind(this),
+					});
 				syncMaintenanceClone(clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: false });
 				const consumeCount = Math.max(0, Math.min(observationLines.length, result.finalize.consumeObservationLines ?? 0));
 				const remaining = observationLines.slice(consumeCount).join("\n");

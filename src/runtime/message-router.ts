@@ -11,6 +11,7 @@ import { isRuntimeBackpressureError } from "./errors.js";
 import { PersonaMemoryService } from "./persona-memory.js";
 import { getRuntimeKey } from "./runtime-key.js";
 import { parseAddressedSlashCommand } from "../command-parsing.js";
+import { buildInboundSessionLogEntry } from "./session-log.js";
 
 function shouldSuppressReprompt(pair: PairRequest, cooldownSeconds: number): boolean {
 	if (!pair.lastPromptedAt) {
@@ -68,12 +69,11 @@ export class MessageRouterService {
 				externalConversationId: sessionAddress.externalConversationId,
 				threadId: sessionAddress.threadId,
 			});
-			this.store.services.sessions.appendSessionLog(agent.agentId, session.sessionRecordId, {
-				timestamp: nowIso(),
-				type: hydratedEvent.eventType,
-				channel: channel.type,
-				...hydratedEvent,
-			});
+			this.store.services.sessions.appendSessionLog(
+				agent.agentId,
+				session.sessionRecordId,
+				buildInboundSessionLogEntry(hydratedEvent),
+			);
 			this.store.audit(agent.agentId, `${channel.type}.inbound`, {
 				sessionRecordId: session.sessionRecordId,
 				sessionKey: session.sessionKey,

@@ -11,12 +11,13 @@ import type {
 	RuntimeDirectorySnapshot,
 	SessionRecord,
 } from "../types.js";
+import { isBotOutboundSessionLogEntry, type SessionLogEntry } from "./session-log.js";
 
 function toExposedChannel(channel: ChannelType): "telegram" | "qq" {
 	return channel === "napcat" ? "qq" : "telegram";
 }
 
-type KnownLogEvent = Partial<InboundMessageEvent> & { timestamp?: string; type?: string; channel?: string };
+type KnownLogEvent = SessionLogEntry;
 
 function normalizeRefId(value: string): string {
 	return value.trim();
@@ -197,6 +198,9 @@ function addLogEntry(
 	session: SessionRecord,
 	entry: KnownLogEvent,
 ): void {
+	if (isBotOutboundSessionLogEntry(entry)) {
+		return;
+	}
 	const eventChannel = entry.channelType === "telegram" || entry.channelType === "napcat" ? entry.channelType : session.channelType;
 	const chatKind = entry.chatKind === "dm" || entry.chatKind === "group" ? entry.chatKind : session.chatKind;
 	const occurredAt = typeof entry.occurredAt === "string" ? entry.occurredAt : typeof entry.timestamp === "string" ? entry.timestamp : session.updatedAt;

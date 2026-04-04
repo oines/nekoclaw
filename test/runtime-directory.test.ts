@@ -94,6 +94,19 @@ describe("runtime directory service", () => {
 			occurredAt: "2026-04-02T08:05:00.000Z",
 			sender: { externalId: "789", displayName: "Carol" },
 		});
+		appendJsonLine(store.getSessionLogPath(agent.slug, groupSession.sessionRecordId), {
+			type: "bot.outbound",
+			channel: "telegram",
+			channelType: "telegram",
+			chatId: "-1001",
+			chatKind: "group",
+			chatTitle: "Tech Group",
+			sessionRecordId: groupSession.sessionRecordId,
+			timestamp: "2026-04-02T08:06:00.000Z",
+			sender: { externalId: "__bot__", displayName: "directory-cat" },
+			payload: { text: "我已经记住了" },
+			source: "outbound",
+		});
 
 		const service = new RuntimeDirectoryService(store);
 		const snapshot = service.buildSnapshot(
@@ -146,6 +159,9 @@ describe("runtime directory service", () => {
 				expect.objectContaining({ account: "telegram:dm:789", displayName: "Carol", source: "runtime_seen" }),
 				expect.objectContaining({ account: "telegram:dm:321", displayName: "Dave", source: "runtime_seen" }),
 			]),
+		);
+		expect(snapshot.contacts).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ account: "telegram:dm:__bot__" })]),
 		);
 	});
 

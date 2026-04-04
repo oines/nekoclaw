@@ -12,6 +12,8 @@ import type {
 import { getRuntimeKey } from "./runtime-key.js";
 import { NEKOCLAW_CONTAINER_WORKSPACE_DIR } from "../config.js";
 import { parseTargetRef } from "./runtime-directory.js";
+import { nowIso } from "../store/helpers.js";
+import { buildBotOutboundSessionLogEntry, type BotOutboundLogSource } from "./session-log.js";
 
 export class OutboundDispatchService {
 	constructor(
@@ -88,6 +90,12 @@ export class OutboundDispatchService {
 			payload: rebasedPayload,
 			event,
 		});
+		this.appendBotOutboundLog(agent, {
+			session,
+			payload,
+			source: "outbound",
+			chatTitle: event.chatTitle ?? session.chatTitle,
+		});
 		this.store.audit(agent.agentId, `${channel.type}.outbound`, {
 			sessionRecordId: session.sessionRecordId,
 			sessionKey: session.sessionKey,
@@ -110,6 +118,11 @@ export class OutboundDispatchService {
 						chatKind: session.chatKind,
 						payload: this.rebasePayload(agent, action.payload),
 					});
+					this.appendBotOutboundLog(agent, {
+						session,
+						payload: action.payload,
+						source: "tool.send",
+					});
 					break;
 				case "send_targeted": {
 					const target = parseTargetRef(action.target);
@@ -126,6 +139,18 @@ export class OutboundDispatchService {
 						chatKind: target.chatKind,
 						payload: this.rebasePayload(agent, action.payload),
 					});
+					const targetSession = this.store.findSessionByAddress(agent.agentId, {
+						channelType: target.channelType,
+						externalConversationId: target.externalConversationId,
+						chatKind: target.chatKind,
+					});
+					if (targetSession) {
+						this.appendBotOutboundLog(agent, {
+							session: targetSession,
+							payload: action.payload,
+							source: "tool.send_targeted",
+						});
+					}
 					break;
 				}
 				case "reply":
@@ -134,6 +159,11 @@ export class OutboundDispatchService {
 						chatKind: session.chatKind,
 						payload: this.rebasePayload(agent, action.payload),
 						replyToId: action.replyToId ?? action.payload.replyToId ?? "",
+					});
+					this.appendBotOutboundLog(agent, {
+						session,
+						payload: action.payload,
+						source: "tool.reply",
 					});
 					break;
 				case "edit":
@@ -176,5 +206,32 @@ export class OutboundDispatchService {
 			actionCount: actions.length,
 			actions: actions.map((action) => action.kind),
 		});
+	}
+
+	private appendBotOutboundLog(
+		agent: AgentSpec,
+		input: {
+			session: SessionRecord;
+			payload: ReplyPayload;
+			source: BotOutboundLogSource;
+			chatTitle?: string;
+		},
+	): void {
+		this.store.services.sessions.appendSessionLog(
+			agent.agentId,
+			input.session.sessionRecordId,
+			buildBotOutboundSessionLogEntry({
+				timestamp: nowIso(),
+				session: {
+					sessionRecordId: input.session.sessionRecordId,
+					channelType: input.session.channelType,
+					externalConversationId: input.session.externalConversationId,
+					chatKind: input.session.chatKind,
+					chatTitle: input.chatTitle ?? input.session.chatTitle,
+				},
+				payload: input.payload,
+				source: input.source,
+			}),
+		);
 	}
 }
