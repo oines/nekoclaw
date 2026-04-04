@@ -38,14 +38,40 @@ export class NekoclawDaemon {
 	constructor(private store: JsonNekoclawStore = new JsonNekoclawStore()) {
 		this.outboundDispatch = new OutboundDispatchService(this.store, this.channelPlugins);
 		this.personaMemory = new PersonaMemoryService(this.store);
-		this.workerRunner = new WorkerRunnerService(this.store, this.outboundDispatch, this.channelPlugins, (agentRef) => this.startAgentContainer(agentRef));
-		this.jobQueue = new JobQueueService(this.store, this.agentQueues, this.activeRunsByAgent, (job) => this.workerRunner.runJob(job));
+		this.workerRunner = new WorkerRunnerService(
+			this.store,
+			this.outboundDispatch,
+			this.channelPlugins,
+			(agentRef) => this.startAgentContainer(agentRef),
+			this.personaMemory,
+		);
+		this.jobQueue = new JobQueueService(
+			this.store,
+			this.agentQueues,
+			this.activeRunsByAgent,
+			(job, context) => this.workerRunner.runJob(job, context),
+			{
+				onEnqueued: (job) => {
+					if (job.kind !== "inbound") {
+						return;
+					}
+					const agent = this.store.getAgentByRef(job.agentId);
+					const session = this.store.getSession(agent.agentId, job.sessionRecordId);
+					this.personaMemory.startSelectorPrefetch(agent, session, job);
+				},
+				onRemoved: (jobs) => {
+					for (const job of jobs) {
+						this.personaMemory.clearSelectorPrefetch(job.agentId, job.jobId);
+					}
+				},
+			},
+		);
 		const commands = new CommandRouterService(
 			this.store,
 			(agentId) => this.jobQueue.getStatus(agentId),
 			(agentId, sessionRecordId) => this.jobQueue.stopSession(agentId, sessionRecordId),
 		);
-		this.messageRouter = new MessageRouterService(this.store, this.channelPlugins, commands, (job) => this.jobQueue.enqueue(job));
+		this.messageRouter = new MessageRouterService(this.store, this.channelPlugins, commands, (job) => this.jobQueue.enqueue(job), this.personaMemory);
 		this.channelRuntime = new ChannelRuntimeService(this.store, this.channelPlugins, getRuntimeKey, (agentId, channelType, event) =>
 			this.messageRouter.handleInbound(agentId, channelType, event),
 		);

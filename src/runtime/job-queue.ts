@@ -1,5 +1,5 @@
 import { JsonNekoclawStore } from "../store/json-store.js";
-import type { ActiveRunState, QueueEvent, QueueStatus, RunJob, WorkerResult } from "../types.js";
+import type { ActiveRunState, JobExecutionContext, QueueEvent, QueueStatus, RunJob, WorkerResult } from "../types.js";
 import { nowIso } from "../store/helpers.js";
 import { QueueFullError } from "./errors.js";
 
@@ -19,12 +19,18 @@ export const MAX_CONCURRENT_SESSIONS_PER_AGENT = 2;
 type SessionQueueMap = Map<string, RunJob[]>;
 type ActiveRunMap = Map<string, ActiveRunState>;
 
+interface JobQueueHooks {
+	onEnqueued?: (job: RunJob) => void;
+	onRemoved?: (jobs: RunJob[]) => void;
+}
+
 export class JobQueueService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly agentQueues: Map<string, SessionQueueMap>,
 		private readonly activeRunsByAgent: Map<string, ActiveRunMap>,
-		private readonly runJob: (job: RunJob) => Promise<WorkerResult>,
+		private readonly runJob: (job: RunJob, context: JobExecutionContext) => Promise<WorkerResult>,
+		private readonly hooks: JobQueueHooks = {},
 	) {}
 
 	initialize(): void {
@@ -62,10 +68,18 @@ export class JobQueueService {
 			sessionRecordId: job.sessionRecordId,
 			sessionKey: job.sessionKey,
 		});
+		this.hooks.onEnqueued?.(job);
 		void this.dispatchAgent(job.agentId);
 	}
 
 	clearAgent(agentId: string): void {
+		const sessionQueues = this.agentQueues.get(agentId);
+		if (sessionQueues) {
+			const removed = Array.from(sessionQueues.values()).flat();
+			if (removed.length > 0) {
+				this.hooks.onRemoved?.(removed);
+			}
+		}
 		this.agentQueues.delete(agentId);
 		this.activeRunsByAgent.delete(agentId);
 	}
@@ -81,10 +95,14 @@ export class JobQueueService {
 		if (removedQueuedCount === 0) {
 			return { removedQueuedCount: 0, hadQueuedWork: false };
 		}
+		const removedJobs = isActiveSession ? queue.slice(1) : [...queue];
 		if (isActiveSession) {
 			queue.splice(1);
 		} else {
 			sessionQueues.delete(sessionRecordId);
+		}
+		if (removedJobs.length > 0) {
+			this.hooks.onRemoved?.(removedJobs);
 		}
 		this.compactQueueLog(agentId, sessionQueues);
 		this.store.audit(agentId, "queue.stop_session", {
@@ -178,6 +196,9 @@ export class JobQueueService {
 		}
 		while (queue.length > 0) {
 			const job = queue[0];
+			const executionContext: JobExecutionContext = {
+				allowPersonaPrefetchWait: this.shouldWaitForPersonaPrefetch(agentId, sessionRecordId, queue, sessionQueues),
+			};
 			const runState: ActiveRunState = {
 				sessionRecordId,
 				jobId: job.jobId,
@@ -187,7 +208,7 @@ export class JobQueueService {
 			this.store.appendQueueEvent(agentId, toQueueEvent("start", job));
 			this.syncRuntimeState(agentId);
 			try {
-				const result = await this.runJob(job);
+				const result = await this.runJob(job, executionContext);
 				this.store.appendQueueEvent(agentId, toQueueEvent("complete", job));
 				this.store.updateAgent(agentId, { lastError: null });
 				this.store.audit(agentId, "queue.complete", {
@@ -205,6 +226,7 @@ export class JobQueueService {
 					error: message,
 				});
 			} finally {
+				this.hooks.onRemoved?.([job]);
 				queue.shift();
 				if (queue.length === 0) {
 					sessionQueues?.delete(sessionRecordId);
@@ -293,5 +315,29 @@ export class JobQueueService {
 			}
 		}
 		return count;
+	}
+
+	private shouldWaitForPersonaPrefetch(
+		agentId: string,
+		sessionRecordId: string,
+		queue: RunJob[],
+		sessionQueues: SessionQueueMap | undefined,
+	): boolean {
+		if (!sessionQueues || queue[0] === undefined) {
+			return false;
+		}
+		if (queue.length !== 1) {
+			return false;
+		}
+		const activeRuns = Array.from(this.getActiveRuns(agentId).values());
+		if (activeRuns.length > 0) {
+			return false;
+		}
+		const queuedWaiting = this.getQueuedWaitingCount(sessionQueues, activeRuns);
+		if (queuedWaiting !== 1) {
+			return false;
+		}
+		const sessionQueue = sessionQueues.get(sessionRecordId);
+		return sessionQueue !== undefined && sessionQueue[0]?.jobId === queue[0]?.jobId;
 	}
 }

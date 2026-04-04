@@ -2,19 +2,83 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeModelsConfig } from "../src/model/model-types.js";
+
+function formatCompactNumber(value: number): string {
+	const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+	return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function formatCompactTokens(value: number): string {
+	if (value >= 1_000_000) {
+		return `${formatCompactNumber(value / 1_000_000)}m`;
+	}
+	if (value >= 1_000) {
+		return `${formatCompactNumber(value / 1_000)}k`;
+	}
+	return value.toLocaleString("en-US");
+}
 
 describe("runtime command router", () => {
 	let tempHome: string;
 	const originalHome = process.env.HOME;
+	let fetchMock: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
 		tempHome = mkdtempSync(join(tmpdir(), "nekoclaw-command-router-"));
 		process.env.HOME = tempHome;
 		vi.resetModules();
+		fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith("/models")) {
+				if (url.includes("openrouter.example")) {
+					return new Response(
+						JSON.stringify({
+							data: [
+								{
+									id: "qwen/qwen3.6-plus:free",
+									name: "Qwen 3.6 Plus Free",
+									context_length: 200000,
+									top_provider: {
+										max_completion_tokens: 16000,
+									},
+								},
+							],
+						}),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					);
+				}
+				return new Response(JSON.stringify({ data: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.endsWith("/responses/input_tokens")) {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { input?: string };
+				return new Response(
+					JSON.stringify({
+						object: "response.input_tokens",
+						input_tokens: typeof body.input === "string" ? body.input.length : 0,
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url.endsWith("/v1/messages/count_tokens")) {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content?: string }> };
+				const text = body.messages?.[0]?.content ?? "";
+				return new Response(JSON.stringify({ input_tokens: text.length }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
 		if (originalHome === undefined) {
 			delete process.env.HOME;
 		} else {
@@ -26,6 +90,7 @@ describe("runtime command router", () => {
 	it("returns status for a paired non-admin user and includes the platform user id", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { TokenService } = await import("../src/runtime/token-service.js");
 		const store = new JsonNekoclawStore();
 		store.createAgent({ slug: "status-cat" });
 		const agent = store.setBuiltinModelConfig("status-cat", { provider: "openai", modelId: "gpt-5" });
@@ -65,6 +130,8 @@ describe("runtime command router", () => {
 
 		expect(handled).toBe(true);
 		expect(reply).toHaveBeenCalledTimes(1);
+		const contextWindow = new TokenService(store).resolveEffectiveModel(agent, session)?.contextWindow;
+		expect(contextWindow).toBeGreaterThan(0);
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Platform user id: 777");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Channel trigger: all");
@@ -74,7 +141,8 @@ describe("runtime command router", () => {
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction: enabled=yes");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction reserveTokens: 20000");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compaction keepRecentTokens: 20000");
-		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Context file size:");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Context: 0/${formatCompactTokens(contextWindow ?? 0)} (0%)`);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).not.toContain("Context file size:");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compactions: 1");
 		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Pruning: enabled");
 	}, 10_000);
@@ -113,6 +181,201 @@ describe("runtime command router", () => {
 
 		expect(handled).toBe(true);
 		expect(reply).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses the session override model when resolving status context limits", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { TokenService } = await import("../src/runtime/token-service.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "status-override-cat" });
+		const agent = store.setBuiltinModelConfig("status-override-cat", { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "123",
+			chatKind: "dm",
+		});
+		store.setSessionModelOverride(agent.agentId, session.sessionRecordId, {
+			provider: "openai",
+			modelId: "gpt-5-mini",
+		});
+		writeFileSync(store.getSessionContextPath(agent.slug, session.sessionRecordId), JSON.stringify({ hello: "world" }), "utf-8");
+		const reply = vi.fn(async () => []);
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+
+		await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "199",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/status" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			store.getSession(agent.agentId, session.sessionRecordId),
+		);
+
+		const contextWindow = new TokenService(store).resolveEffectiveModel(store.getAgentByRef(agent.agentId), store.getSession(agent.agentId, session.sessionRecordId))?.contextWindow;
+		expect(contextWindow).toBeGreaterThan(0);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Effective model: openai/gpt-5-mini (session override)");
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Context: 0/${formatCompactTokens(contextWindow ?? 0)} (0%)`);
+	});
+
+	it("shows unknown context when the effective model has no context window metadata", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "status-custom-cat" });
+		const agent = store.setCustomModelConfig("status-custom-cat", {
+			baseUrl: "https://example.invalid/v1",
+			api: "openai-completions",
+			providerId: "custom-ai",
+			modelId: "custom-1",
+			apiKey: "test-key",
+		});
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "123",
+			chatKind: "dm",
+		});
+		writeFileSync(store.getSessionContextPath(agent.slug, session.sessionRecordId), JSON.stringify({ hello: "world" }), "utf-8");
+		const reply = vi.fn(async () => []);
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+
+		await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "200",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/status" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			session,
+		);
+
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Context: 0/?");
+	});
+
+	it("reads the latest usage snapshot from context jsonl for status context usage", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { TokenService } = await import("../src/runtime/token-service.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "status-usage-cat" });
+		const agent = store.setBuiltinModelConfig("status-usage-cat", { provider: "openai", modelId: "gpt-5" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "333",
+			chatKind: "dm",
+		});
+		writeFileSync(
+			store.getSessionContextPath(agent.slug, session.sessionRecordId),
+			[
+				JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 1200, totalTokens: 1400 } } }),
+				JSON.stringify({ type: "compaction", id: "compact-1" }),
+				JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 14519, totalTokens: 14739 } } }),
+			].join("\n"),
+			"utf-8",
+		);
+		const reply = vi.fn(async () => []);
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+
+		await router.handleCommand(
+			agent,
+			{ actions: { reply } } as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "333",
+				chatKind: "dm",
+				messageId: "201",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/status" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			session,
+		);
+
+		const contextWindow = new TokenService(store).resolveEffectiveModel(agent, session)?.contextWindow;
+		expect(contextWindow).toBeGreaterThan(0);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Context: ${formatCompactTokens(14519)}/${formatCompactTokens(contextWindow ?? 0)}`);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain("Compactions: 1");
+	});
+
+	it("refreshes custom openai-compatible model metadata and persists context window for status", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "status-openrouter-cat" });
+		const agent = store.setCustomModelConfig("status-openrouter-cat", {
+			baseUrl: "https://openrouter.example/api/v1",
+			api: "openai-completions",
+			providerId: "openrouter-direct",
+			modelId: "qwen/qwen3.6-plus:free",
+			apiKey: "test-key",
+		});
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "456",
+			chatKind: "dm",
+		});
+		store.writeRuntimeModelsConfig(
+			agent.agentId,
+			{
+				providers: {
+					"openrouter-direct": {
+						baseUrl: "https://openrouter.example/api/v1",
+						api: "openai-completions",
+						apiKey: "NEKOCLAW_CUSTOM_MODEL_API_KEY",
+						authHeader: true,
+						models: [{ id: "qwen/qwen3.6-plus:free", name: "qwen/qwen3.6-plus:free" }],
+					},
+				},
+			},
+			{},
+		);
+		writeFileSync(
+			store.getSessionContextPath(agent.slug, session.sessionRecordId),
+			JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 19364, totalTokens: 19394 } } }),
+			"utf-8",
+		);
+		const reply = vi.fn(async () => []);
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+
+		await router.handleCommand(
+			agent,
+			{ actions: { reply } } as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "456",
+				chatKind: "dm",
+				messageId: "202",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/status" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			session,
+		);
+
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toContain(`Context: ${formatCompactTokens(19364)}/200k (9.7%)`);
+		const runtimeConfig = store.readRuntimeModelsConfig(agent.agentId) as RuntimeModelsConfig;
+		const model = runtimeConfig.providers["openrouter-direct"]?.models?.find((entry) => entry.id === "qwen/qwen3.6-plus:free");
+		expect(model?.contextWindow).toBe(200000);
+		expect(model?.maxTokens).toBe(16000);
 	});
 
 	it("returns status for a group command prefixed by a mention token", async () => {

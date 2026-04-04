@@ -83,6 +83,56 @@ describe("job queue", () => {
 		expect(appendSpy.mock.calls.map(([, event]) => event.type)).toEqual(["enqueue", "start", "complete"]);
 	});
 
+	it("starts prefetch on enqueue and allows waiting only for the immediate first job", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const store = new JsonNekoclawStore();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const agent = store.createAgent({ slug: "prefetch-queue-cat" });
+		const contexts: Array<{ jobId: string; allowPersonaPrefetchWait: boolean }> = [];
+		const gates = new Map<string, ReturnType<typeof deferred<WorkerResult>>>();
+		const onEnqueued = vi.fn();
+		const onRemoved = vi.fn();
+		const queue = new JobQueueService(
+			store,
+			queues,
+			activeRunsByAgent,
+			async (job, context) => {
+				contexts.push({ jobId: job.jobId, allowPersonaPrefetchWait: context.allowPersonaPrefetchWait });
+				const gate = deferred<WorkerResult>();
+				gates.set(job.jobId, gate);
+				return gate.promise;
+			},
+			{ onEnqueued, onRemoved },
+		);
+
+		const first = createJob(agent.agentId, "session-a", "2026-03-29T00:00:00.000Z", "a");
+		const second = createJob(agent.agentId, "session-a", "2026-03-29T00:00:01.000Z", "a");
+
+		await queue.enqueue(first);
+		await flushMicrotasks();
+		expect(onEnqueued).toHaveBeenCalledWith(first);
+		expect(contexts).toEqual([{ jobId: first.jobId, allowPersonaPrefetchWait: true }]);
+
+		await queue.enqueue(second);
+		await flushMicrotasks();
+		expect(onEnqueued).toHaveBeenCalledWith(second);
+		expect(contexts).toEqual([{ jobId: first.jobId, allowPersonaPrefetchWait: true }]);
+
+		gates.get(first.jobId)?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+
+		expect(contexts).toEqual([
+			{ jobId: first.jobId, allowPersonaPrefetchWait: true },
+			{ jobId: second.jobId, allowPersonaPrefetchWait: false },
+		]);
+		expect(onRemoved).toHaveBeenCalledWith([first]);
+
+		gates.get(second.jobId)?.resolve({ outbound: {} });
+		await flushMicrotasks(6);
+		expect(onRemoved).toHaveBeenCalledWith([second]);
+	});
+
 	it("compacts pending queue events during initialization", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const store = new JsonNekoclawStore();

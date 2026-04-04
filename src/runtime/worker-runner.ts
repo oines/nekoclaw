@@ -3,7 +3,7 @@ import { hasOutboundContent } from "../messages.js";
 import { MODEL_ENV_MAP } from "../model/provider-key.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
 import { readJsonLines } from "../store/fs.js";
-import type { AgentSpec, ChannelPlugin, ReplyPayload, RunJob, SessionRecord, WorkerPayload, WorkerResult } from "../types.js";
+import type { AgentSpec, ChannelPlugin, JobExecutionContext, ReplyPayload, RunJob, SessionRecord, WorkerPayload, WorkerResult } from "../types.js";
 import { runWorkerInContainer } from "./docker.js";
 import { OutboundDispatchService } from "./outbound-dispatch.js";
 import { PersonaMemoryService } from "./persona-memory.js";
@@ -11,6 +11,7 @@ import { parseTargetRef } from "./runtime-directory.js";
 import { RuntimeDirectoryService } from "./runtime-directory.js";
 import { getRuntimeKey } from "./runtime-key.js";
 import { buildFormationTimeline, isBotOutboundSessionLogEntry, type SessionLogEntry, summarizeReplyPayload } from "./session-log.js";
+import { TokenService } from "./token-service.js";
 
 function isCurrentSessionTarget(target: string, session: Pick<SessionRecord, "channelType" | "chatKind" | "externalConversationId">): boolean {
 	const parsed = parseTargetRef(target);
@@ -24,13 +25,14 @@ function isCurrentSessionTarget(target: string, session: Pick<SessionRecord, "ch
 	);
 }
 
-export function buildFormationTurnTranscript(
+export async function buildFormationTurnTranscript(
 	store: Pick<JsonNekoclawStore, "getSessionLogPath">,
 	agent: Pick<AgentSpec, "slug">,
 	job: Pick<RunJob, "event">,
 	session: Pick<SessionRecord, "sessionRecordId" | "channelType" | "chatKind" | "externalConversationId">,
 	result: WorkerResult,
-): string {
+	countTextTokens?: (value: string) => Promise<Awaited<ReturnType<TokenService["countText"]>>>,
+): Promise<string> {
 	const fallbackBotPayloads: ReplyPayload[] = [];
 	for (const action of result.toolActions ?? []) {
 		if (action.kind !== "send" && action.kind !== "reply" && action.kind !== "send_targeted") {
@@ -61,10 +63,11 @@ export function buildFormationTurnTranscript(
 			entry.chatId === job.event.chatId
 		);
 	});
-	return buildFormationTimeline({
+	return await buildFormationTimeline({
 		logEntries: filteredEntries,
 		currentEvent: job.event,
 		fallbackBotPayloads,
+		countTextTokens,
 	});
 }
 
@@ -88,24 +91,30 @@ function parseWorkerResult(stdout: string): WorkerResult {
 export class WorkerRunnerService {
 	private readonly personaMemory: PersonaMemoryService;
 	private readonly runtimeDirectory: RuntimeDirectoryService;
+	private readonly tokenService: TokenService;
 
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly outbound: OutboundDispatchService,
 		private readonly channelPlugins: Map<string, ChannelPlugin>,
 		private readonly ensureContainer: (agentRef: string) => Promise<string>,
+		personaMemory = new PersonaMemoryService(store),
 	) {
-		this.personaMemory = new PersonaMemoryService(store);
+		this.personaMemory = personaMemory;
 		this.runtimeDirectory = new RuntimeDirectoryService(store);
+		this.tokenService = new TokenService(store);
 	}
 
-	async runJob(job: RunJob): Promise<WorkerResult> {
+	async runJob(job: RunJob, context?: JobExecutionContext): Promise<WorkerResult> {
 		const agent = this.store.getAgentByRef(job.agentId);
 		const session = this.store.getSession(agent.agentId, job.sessionRecordId);
 		const effectiveModel = this.resolveEffectiveModel(agent, session, job);
 		await this.ensureContainer(agent.agentId);
 		const plugin = this.channelPlugins.get(getRuntimeKey(agent.agentId, session.channelType));
-		const personaContext = await this.personaMemory.buildPreparedContext(agent, session, job.event, effectiveModel);
+		const personaContext = await this.personaMemory.buildPreparedContext(agent, session, job.event, effectiveModel, {
+			prefetchJobId: job.jobId,
+			allowPrefetchWait: context?.allowPersonaPrefetchWait ?? false,
+		});
 		const runtimeDirectory = this.runtimeDirectory.buildSnapshot(agent, session, job.event);
 		const payload: WorkerPayload = {
 			agent,
@@ -139,7 +148,10 @@ export class WorkerRunnerService {
 			if (hasOutboundContent(result.outbound)) {
 				await this.outbound.sendToSession(agent, session, job.event, result.outbound);
 			}
-			const recentTimeline = buildFormationTurnTranscript(this.store, agent, job, session, result);
+			const tokenModel = this.tokenService.resolveEffectiveModel(agent, session);
+			const recentTimeline = await buildFormationTurnTranscript(this.store, agent, job, session, result, (value) =>
+				this.tokenService.countText(tokenModel, value),
+			);
 			this.personaMemory.scheduleFormation({
 				agent,
 				session,

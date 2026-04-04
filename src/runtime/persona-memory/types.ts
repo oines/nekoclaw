@@ -61,4 +61,16 @@ export interface PersonaMemoryRuntimeState {
 	backlogSweepQueued: Set<string>;
 	dreamQueued: Set<string>;
 	dreamSkipAuditCache: Map<string, string>;
+	selectorPrefetches: Map<
+		string,
+		{
+			promise: Promise<unknown>;
+			startedAt: number;
+			settled: boolean;
+			consumed: boolean;
+			result?: unknown;
+			error?: string;
+			manifestCount: number;
+		}
+	>;
 }

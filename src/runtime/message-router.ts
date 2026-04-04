@@ -38,8 +38,9 @@ export class MessageRouterService {
 			createdAt: string;
 			event: InboundMessageEvent;
 		}) => Promise<void>,
+		personaMemory = new PersonaMemoryService(store),
 	) {
-		this.personaMemory = new PersonaMemoryService(store);
+		this.personaMemory = personaMemory;
 	}
 
 	async handleInbound(agentId: string, channelType: ChannelType, event: InboundMessageEvent): Promise<void> {

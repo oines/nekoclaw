@@ -1,10 +1,12 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { SESSION_COMPACTION_SETTINGS, SESSION_PRUNING_ENABLED } from "./session-hygiene.js";
 import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { parseAddressedSlashCommand } from "../command-parsing.js";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV } from "../config.js";
 import { upsertRuntimeModelsConfig } from "../model/probe.js";
+import { readJsonLines } from "../store/fs.js";
 import { JsonNekoclawStore } from "../store/json-store.js";
+import { TokenService } from "./token-service.js";
 import type {
 	AgentSpec,
 	ChannelPlugin,
@@ -18,6 +20,17 @@ import type {
 
 import type { RuntimeModelsConfig } from "../model/model-types.js";
 
+interface SessionContextUsageEntry {
+	type?: string;
+	message?: {
+		role?: string;
+		usage?: {
+			input?: number;
+			totalTokens?: number;
+		};
+	};
+}
+
 type ParsedCommand =
 	| { kind: "pair" }
 	| { kind: "help" }
@@ -30,6 +43,8 @@ type ParsedCommand =
 type MutableGroupTriggerPlugin = ChannelPlugin & { groupTrigger?: "all" | "mention" };
 
 export class CommandRouterService {
+	private readonly tokenService: TokenService;
+
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly getQueueStatus: (agentId: string) => QueueStatus,
@@ -37,7 +52,9 @@ export class CommandRouterService {
 			removedQueuedCount: 0,
 			hadQueuedWork: false,
 		}),
-	) {}
+	) {
+		this.tokenService = new TokenService(store);
+	}
 
 	async handleCommand(
 		agent: AgentSpec,
@@ -94,7 +111,7 @@ export class CommandRouterService {
 					return true;
 				}
 				await this.reply(plugin, event, {
-					text: this.buildStatusText(agent, event, session, isAdmin),
+					text: await this.buildStatusText(agent, event, session, isAdmin),
 				});
 				return true;
 			case "stop":
@@ -243,12 +260,12 @@ export class CommandRouterService {
 		}
 	}
 
-	private buildStatusText(
+	private async buildStatusText(
 		agent: AgentSpec,
 		event: InboundMessageEvent,
 		session: SessionRecord | undefined,
 		isAdmin: boolean,
-	): string {
+	): Promise<string> {
 		const queue = this.getQueueStatus(agent.agentId);
 		const activeRunsSummary =
 			queue.activeRuns && queue.activeRuns.length > 0
@@ -259,7 +276,7 @@ export class CommandRouterService {
 			: agent.provider && agent.modelId
 				? `${agent.provider}/${agent.modelId}`
 				: "none";
-		const hygiene = this.getSessionHygiene(agent, session);
+		const hygiene = await this.getSessionHygiene(agent, session);
 		return [
 			`Agent: ${agent.slug}`,
 			`Role: ${isAdmin ? "admin" : "user"}`,
@@ -272,52 +289,88 @@ export class CommandRouterService {
 			`Compaction: enabled=${SESSION_COMPACTION_SETTINGS.enabled ? "yes" : "no"}`,
 			`Compaction reserveTokens: ${SESSION_COMPACTION_SETTINGS.reserveTokens}`,
 			`Compaction keepRecentTokens: ${SESSION_COMPACTION_SETTINGS.keepRecentTokens}`,
-			`Context file size: ${hygiene.contextFileSize}`,
+			`Context: ${hygiene.contextUsage}`,
 			`Compactions: ${hygiene.compactions}`,
 			`Pruning: ${SESSION_PRUNING_ENABLED ? "enabled" : "disabled"}`,
 		].join("\n");
 	}
 
-	private getSessionHygiene(
+	private async getSessionHygiene(
 		agent: AgentSpec,
 		session: SessionRecord | undefined,
-	): { contextFileSize: string; compactions: string } {
+	): Promise<{ contextUsage: string; compactions: string }> {
 		if (!session) {
 			return {
-				contextFileSize: "none",
+				contextUsage: "none",
 				compactions: "unknown",
 			};
 		}
 		const contextPath = this.store.getSessionContextPath(agent.slug, session.sessionRecordId);
+		const tokenModel = await this.tokenService.resolveEffectiveModelWithContext(agent, session);
 		if (!existsSync(contextPath)) {
 			return {
-				contextFileSize: "0 bytes",
+				contextUsage: this.formatContextUsage(0, tokenModel?.contextWindow),
 				compactions: "0",
 			};
 		}
-		const sizeBytes = statSync(contextPath).size;
 		try {
-			const lines = readFileSync(contextPath, "utf-8")
-				.split(/\r?\n/)
-				.filter((line) => line.trim().length > 0);
-			const compactions = lines.reduce((total, line) => {
-				try {
-					const parsed = JSON.parse(line) as { type?: string };
-					return total + (parsed.type === "compaction" ? 1 : 0);
-				} catch {
-					return total;
-				}
-			}, 0);
+			const lines = readJsonLines<SessionContextUsageEntry>(contextPath);
+			const compactions = lines.reduce((total, line) => total + (line.type === "compaction" ? 1 : 0), 0);
 			return {
-				contextFileSize: `${sizeBytes} bytes`,
+				contextUsage: this.formatContextUsage(this.findLatestPromptUsage(lines) ?? 0, tokenModel?.contextWindow),
 				compactions: String(compactions),
 			};
 		} catch {
 			return {
-				contextFileSize: `${sizeBytes} bytes`,
+				contextUsage: this.formatContextUsage(undefined, tokenModel?.contextWindow),
 				compactions: "unknown",
 			};
 		}
+	}
+
+	private findLatestPromptUsage(lines: SessionContextUsageEntry[]): number | undefined {
+		for (let index = lines.length - 1; index >= 0; index -= 1) {
+			const usage = lines[index]?.message?.usage;
+			if (typeof usage?.input === "number" && Number.isFinite(usage.input) && usage.input >= 0) {
+				return usage.input;
+			}
+			if (typeof usage?.totalTokens === "number" && Number.isFinite(usage.totalTokens) && usage.totalTokens >= 0) {
+				return usage.totalTokens;
+			}
+		}
+		return undefined;
+	}
+
+	private formatContextUsage(usedTokens: number | undefined, contextWindow: number | undefined): string {
+		const usedLabel = usedTokens === undefined ? "?" : this.formatCompactTokens(usedTokens);
+		const maxLabel = contextWindow === undefined ? "?" : this.formatCompactTokens(contextWindow);
+		if (usedTokens !== undefined && contextWindow !== undefined && contextWindow > 0) {
+			return `${usedLabel}/${maxLabel} (${this.formatPercent(usedTokens, contextWindow)})`;
+		}
+		return `${usedLabel}/${maxLabel}`;
+	}
+
+	private formatCompactTokens(value: number): string {
+		if (value >= 1_000_000) {
+			return `${this.formatCompactNumber(value / 1_000_000)}m`;
+		}
+		if (value >= 1_000) {
+			return `${this.formatCompactNumber(value / 1_000)}k`;
+		}
+		return value.toLocaleString("en-US");
+	}
+
+	private formatCompactNumber(value: number): string {
+		const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+		return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+	}
+
+	private formatPercent(used: number, max: number): string {
+		if (max <= 0) {
+			return "0%";
+		}
+		const rounded = Math.round((used / max) * 1000) / 10;
+		return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}%`;
 	}
 
 	private buildHelpText(isAdmin: boolean): string {

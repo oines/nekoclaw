@@ -17,21 +17,39 @@ import { createMaintenanceClone, destroyMaintenanceClone, executeMaintenanceSess
 import { buildObservationSignature, buildSceneMemoryPath, buildSceneRef, collectEventText, formatObservationLine, shouldRunFormationForObservations, takeTailLinesWithinBudget, trimToTokenBudget } from "./observations.js";
 import { PersonaPaths } from "./paths.js";
 import { selectRelevantPersonaMemories } from "./selector.js";
+import { TokenService } from "../token-service.js";
 import type { DreamState, FormationRetryState, PersonaMemoryRuntimeState } from "./types.js";
 
 const SELECTED_MEMORY_TOKEN_BUDGET = 800;
 
+type PreparedPersonaMemorySelection = PreparedPersonaContext["selectedMemoryMarkdowns"];
+
+interface PersonaSelectorPrefetchHandle {
+	promise: Promise<PreparedPersonaMemorySelection>;
+	startedAt: number;
+	settled: boolean;
+	consumed: boolean;
+	result?: PreparedPersonaMemorySelection;
+	error?: string;
+	manifestCount: number;
+}
+
 export class PersonaMemoryService {
 	private readonly storePaths = new StorePaths();
+
+	private readonly tokenService: TokenService;
 
 	private readonly state: PersonaMemoryRuntimeState = {
 		maintenanceLocks: new Map<string, Promise<void>>(),
 		backlogSweepQueued: new Set<string>(),
 		dreamQueued: new Set<string>(),
 		dreamSkipAuditCache: new Map<string, string>(),
+		selectorPrefetches: new Map<string, PersonaSelectorPrefetchHandle>(),
 	};
 
-	constructor(private readonly store: JsonNekoclawStore) {}
+	constructor(private readonly store: JsonNekoclawStore) {
+		this.tokenService = new TokenService(store);
+	}
 
 	recordInbound(agentId: string, session: SessionRecord | undefined, event: InboundMessageEvent): void {
 		const agent = this.store.getAgentByRef(agentId);
@@ -50,17 +68,77 @@ export class PersonaMemoryService {
 		session: SessionRecord,
 		event: InboundMessageEvent,
 		effectiveModel?: WorkerPayload["effectiveModel"],
+		options?: {
+			prefetchJobId?: string;
+			allowPrefetchWait?: boolean;
+		},
 	): Promise<PreparedPersonaContext> {
 		const paths = this.ensurePersonaLayout(agent.slug);
 		const sceneRef = buildSceneRef(session, event);
-		const indexMarkdown = trimToTokenBudget(readTextFile(paths.indexPath, ""), INDEX_TOKEN_BUDGET);
-		const sceneObservations = this.readSceneObservations(paths, sceneRef);
-		const selectedMemoryMarkdowns = await this.selectMemoryFiles(agent, paths, event, effectiveModel);
+		const tokenModel = this.tokenService.resolveEffectiveModel(agent, session);
+		const countTextTokens = (value: string) => this.tokenService.countText(tokenModel, value);
+		const indexMarkdown = await trimToTokenBudget(readTextFile(paths.indexPath, ""), INDEX_TOKEN_BUDGET, countTextTokens);
+		const sceneObservations = await this.readSceneObservations(paths, sceneRef, countTextTokens);
+		const selectedMemoryMarkdowns = await this.resolveSelectedMemoryFiles(agent, session, paths, event, effectiveModel, options);
 		return {
 			indexMarkdown,
 			selectedMemoryMarkdowns,
 			sceneObservations,
 		};
+	}
+
+	startSelectorPrefetch(
+		agent: AgentSpec,
+		session: SessionRecord,
+		job: Pick<{ jobId: string; event: InboundMessageEvent }, "jobId" | "event">,
+	): void {
+		const key = this.selectorPrefetchKey(agent.agentId, job.jobId);
+		if (this.state.selectorPrefetches.has(key)) {
+			return;
+		}
+		const paths = this.ensurePersonaLayout(agent.slug);
+		const start = this.startSelectorSelection(agent, session, paths, job.event, this.resolveEffectiveModel(agent, session), {
+			source: "prefetch",
+			prefetchJobId: job.jobId,
+		});
+		if (!start) {
+			return;
+		}
+		const handle: PersonaSelectorPrefetchHandle = {
+			promise: start.promise,
+			startedAt: Date.now(),
+			settled: false,
+			consumed: false,
+			manifestCount: start.manifestCount,
+		};
+		handle.promise
+			.then((result) => {
+				handle.result = result;
+				handle.settled = true;
+			})
+			.catch((error) => {
+				handle.error = error instanceof Error ? error.message : String(error);
+				handle.settled = true;
+			});
+		this.state.selectorPrefetches.set(key, handle);
+		this.store.audit(agent.agentId, "persona.selector_prefetch_started", {
+			jobId: job.jobId,
+			sessionRecordId: session.sessionRecordId,
+			manifestCount: start.manifestCount,
+		});
+	}
+
+	clearSelectorPrefetch(agentId: string, jobId: string): void {
+		this.state.selectorPrefetches.delete(this.selectorPrefetchKey(agentId, jobId));
+	}
+
+	clearAgentPrefetches(agentId: string): void {
+		const prefix = `${agentId}:`;
+		for (const key of this.state.selectorPrefetches.keys()) {
+			if (key.startsWith(prefix)) {
+				this.state.selectorPrefetches.delete(key);
+			}
+		}
 	}
 
 	scheduleFormation(input: {
@@ -159,73 +237,87 @@ export class PersonaMemoryService {
 		return paths;
 	}
 
-	private readSceneObservations(paths: PersonaPaths, sceneRef: string): string {
-		return takeTailLinesWithinBudget(readTextFile(paths.observationPath(sceneRef), ""));
+	private async readSceneObservations(
+		paths: PersonaPaths,
+		sceneRef: string,
+		countTextTokens: (value: string) => ReturnType<TokenService["countText"]>,
+	): Promise<string> {
+		return await takeTailLinesWithinBudget(readTextFile(paths.observationPath(sceneRef), ""), undefined, undefined, countTextTokens);
 	}
 
-	private async selectMemoryFiles(
+	private async resolveSelectedMemoryFiles(
 		agent: AgentSpec,
+		session: SessionRecord,
+		paths: PersonaPaths,
+		event: InboundMessageEvent,
+		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
+		options:
+			| {
+					prefetchJobId?: string;
+					allowPrefetchWait?: boolean;
+			  }
+			| undefined,
+	): Promise<PreparedPersonaContext["selectedMemoryMarkdowns"]> {
+		const prefetchJobId = options?.prefetchJobId;
+		if (!prefetchJobId) {
+			return await this.selectMemoryFilesInline(agent, session, paths, event, effectiveModel);
+		}
+		const handle = this.state.selectorPrefetches.get(this.selectorPrefetchKey(agent.agentId, prefetchJobId)) as
+			| PersonaSelectorPrefetchHandle
+			| undefined;
+		if (!handle) {
+			return [];
+		}
+		if (!handle.settled && !options?.allowPrefetchWait) {
+			return [];
+		}
+		if (handle.error) {
+			return [];
+		}
+		try {
+			const selected = options?.allowPrefetchWait ? await handle.promise : (handle.result ?? []);
+			if (!handle.consumed) {
+				handle.consumed = true;
+				this.store.audit(agent.agentId, "persona.selector_prefetch_consumed", {
+					jobId: prefetchJobId,
+					sessionRecordId: session.sessionRecordId,
+					waited: Boolean(options?.allowPrefetchWait),
+					manifestCount: handle.manifestCount,
+					selectedCount: selected.length,
+					selectedPaths: selected.map((entry) => entry.path),
+				});
+				this.store.audit(agent.agentId, "persona.selector_applied", {
+					selectedPaths: selected.map((entry) => entry.path),
+					selectedCount: selected.length,
+					manifestCount: handle.manifestCount,
+				});
+			}
+			return selected;
+		} catch {
+			return [];
+		}
+	}
+
+	private async selectMemoryFilesInline(
+		agent: AgentSpec,
+		session: SessionRecord,
 		paths: PersonaPaths,
 		event: InboundMessageEvent,
 		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
 	): Promise<PreparedPersonaContext["selectedMemoryMarkdowns"]> {
-		const manifest = this.scanPersonaMemoryManifest(agent.slug);
-		if (manifest.length === 0) {
-			return [];
-		}
-		const messageText = this.buildSelectorMessageText(event);
-		if (!messageText) {
-			return [];
-		}
-		const modelConfig = this.resolveModel(agent, effectiveModel);
-		if (!modelConfig) {
+		const start = this.startSelectorSelection(agent, session, paths, event, effectiveModel, { source: "inline" });
+		if (!start) {
 			return [];
 		}
 		try {
-			const result = await selectRelevantPersonaMemories(
-				modelConfig.model,
-				{
-					senderAccount: this.buildSelectorSenderAccount(event),
-					senderDisplayName: event.sender.displayName,
-					messageText,
-					manifest,
-				},
-				{ apiKey: modelConfig.apiKey },
-			);
-			const manifestByPath = new Map(manifest.map((entry) => [entry.path, entry] as const));
-			const selected = result.paths
-				.map((path) => {
-					const entry = manifestByPath.get(path);
-					if (!entry) {
-						return undefined;
-					}
-					return {
-						path: entry.path,
-						kind: entry.kind,
-						title: entry.title,
-						description: entry.description,
-						markdown: trimToTokenBudget(readTextFile(join(paths.personaDir, entry.path), ""), SELECTED_MEMORY_TOKEN_BUDGET),
-					};
-				})
-				.filter((entry): entry is PreparedPersonaContext["selectedMemoryMarkdowns"][number] => Boolean(entry && entry.markdown.trim()));
+			const selected = await start.promise;
 			this.store.audit(agent.agentId, "persona.selector_applied", {
 				selectedPaths: selected.map((entry) => entry.path),
 				selectedCount: selected.length,
-				manifestCount: manifest.length,
+				manifestCount: start.manifestCount,
 			});
 			return selected;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (message.includes("selector timeout")) {
-				this.store.audit(agent.agentId, "persona.selector_timeout", {
-					manifestCount: manifest.length,
-				});
-			} else {
-				this.store.audit(agent.agentId, "persona.selector_failed", {
-					error: message,
-					manifestCount: manifest.length,
-				});
-			}
+		} catch {
 			return [];
 		}
 	}
@@ -236,6 +328,100 @@ export class PersonaMemoryService {
 
 	private buildDreamCorpusSnapshot(slug: string) {
 		return buildDreamCorpusSnapshot(this.ensurePersonaLayout(slug));
+	}
+
+	private startSelectorSelection(
+		agent: AgentSpec,
+		session: SessionRecord,
+		paths: PersonaPaths,
+		event: InboundMessageEvent,
+		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
+		options: {
+			source: "inline" | "prefetch";
+			prefetchJobId?: string;
+		},
+	): { manifestCount: number; promise: Promise<PreparedPersonaMemorySelection> } | undefined {
+		const manifest = this.scanPersonaMemoryManifest(agent.slug);
+		if (manifest.length === 0) {
+			return undefined;
+		}
+		const messageText = this.buildSelectorMessageText(event);
+		if (!messageText) {
+			return undefined;
+		}
+		const modelConfig = this.resolveModel(agent, effectiveModel);
+		if (!modelConfig) {
+			return undefined;
+		}
+		const tokenModel = this.tokenService.resolveEffectiveModel(agent, session);
+		const countTextTokens = (value: string) => this.tokenService.countText(tokenModel, value);
+		const manifestByPath = new Map(manifest.map((entry) => [entry.path, entry] as const));
+		const promise = (async () => {
+			try {
+				const result = await selectRelevantPersonaMemories(
+					modelConfig.model,
+					{
+						senderAccount: this.buildSelectorSenderAccount(event),
+						senderDisplayName: event.sender.displayName,
+						messageText,
+						manifest,
+					},
+					{ apiKey: modelConfig.apiKey },
+				);
+				const selected = await Promise.all(
+					result.paths.map(async (path) => {
+						const entry = manifestByPath.get(path);
+						if (!entry) {
+							return undefined;
+						}
+						return {
+							path: entry.path,
+							kind: entry.kind,
+							title: entry.title,
+							description: entry.description,
+							markdown: await trimToTokenBudget(
+								readTextFile(join(paths.personaDir, entry.path), ""),
+								SELECTED_MEMORY_TOKEN_BUDGET,
+								countTextTokens,
+							),
+						};
+					}),
+				);
+				return selected.filter((entry): entry is PreparedPersonaMemorySelection[number] => Boolean(entry && entry.markdown.trim()));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (message.includes("selector timeout")) {
+					if (options.source === "prefetch") {
+						this.store.audit(agent.agentId, "persona.selector_prefetch_timeout", {
+							jobId: options.prefetchJobId,
+							sessionRecordId: session.sessionRecordId,
+							manifestCount: manifest.length,
+						});
+					}
+					this.store.audit(agent.agentId, "persona.selector_timeout", {
+						manifestCount: manifest.length,
+					});
+				} else {
+					if (options.source === "prefetch") {
+						this.store.audit(agent.agentId, "persona.selector_prefetch_failed", {
+							jobId: options.prefetchJobId,
+							sessionRecordId: session.sessionRecordId,
+							error: message,
+							manifestCount: manifest.length,
+						});
+					}
+					this.store.audit(agent.agentId, "persona.selector_failed", {
+						error: message,
+						manifestCount: manifest.length,
+					});
+				}
+				throw error;
+			}
+		})();
+		return {
+			manifestCount: manifest.length,
+			promise,
+		};
 	}
 
 	private async executeMaintenanceSession(
@@ -535,6 +721,26 @@ export class PersonaMemoryService {
 		return collectEventText(event)
 			.replace(/^- [A-Za-z]+:\s*/gm, "")
 			.trim();
+	}
+
+	private resolveEffectiveModel(agent: AgentSpec, session: SessionRecord): WorkerPayload["effectiveModel"] | undefined {
+		return session.modelOverride
+			? {
+					provider: session.modelOverride.provider,
+					modelId: session.modelOverride.modelId,
+					thinkingLevel: agent.thinkingLevel,
+				}
+			: agent.provider && agent.modelId
+				? {
+						provider: agent.provider,
+						modelId: agent.modelId,
+						thinkingLevel: agent.thinkingLevel,
+					}
+				: undefined;
+	}
+
+	private selectorPrefetchKey(agentId: string, jobId: string): string {
+		return `${agentId}:${jobId}`;
 	}
 
 	private resolveModel(

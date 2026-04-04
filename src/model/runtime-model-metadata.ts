@@ -3,8 +3,27 @@ import type { RuntimeModelEntry, RuntimeModelProvider, RuntimeModelsConfig } fro
 
 export type RuntimeModelInputKind = "text" | "image";
 
+export interface RuntimeModelLimits {
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
 function normalizeBaseUrl(value: string | undefined): string | undefined {
 	return value ? value.replace(/\/+$/, "").toLowerCase() : undefined;
+}
+
+function toPositiveNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function pickPositiveNumber(values: Iterable<unknown>): number | undefined {
+	for (const value of values) {
+		const resolved = toPositiveNumber(value);
+		if (resolved !== undefined) {
+			return resolved;
+		}
+	}
+	return undefined;
 }
 
 function uniqueInputs(values: Iterable<string>): RuntimeModelInputKind[] {
@@ -45,6 +64,21 @@ export function normalizeRuntimeModelEntryInput(entry: RuntimeModelEntry | undef
 	return deriveInputFromCapabilities(entry.capabilities);
 }
 
+function normalizeRuntimeModelLimits(entry: RuntimeModelEntry | undefined): RuntimeModelLimits | undefined {
+	if (!entry) {
+		return undefined;
+	}
+	const contextWindow = toPositiveNumber(entry.contextWindow);
+	const maxTokens = toPositiveNumber(entry.maxTokens);
+	if (contextWindow === undefined && maxTokens === undefined) {
+		return undefined;
+	}
+	return {
+		contextWindow,
+		maxTokens,
+	};
+}
+
 function inferInputFromBuiltins(input: {
 	modelId: string;
 	api?: string;
@@ -70,6 +104,44 @@ function inferInputFromBuiltins(input: {
 				continue;
 			}
 			fallbackMatches.push(normalized);
+		}
+	}
+	return exactMatches[0] ?? fallbackMatches[0];
+}
+
+function inferLimitsFromBuiltins(input: {
+	modelId: string;
+	api?: string;
+	baseUrl?: string;
+}): RuntimeModelLimits | undefined {
+	const targetBaseUrl = normalizeBaseUrl(input.baseUrl);
+	const exactMatches: RuntimeModelLimits[] = [];
+	const fallbackMatches: RuntimeModelLimits[] = [];
+	for (const provider of getProviders()) {
+		for (const model of getModels(provider)) {
+			if (model.id !== input.modelId) {
+				continue;
+			}
+			if (input.api && model.api !== input.api) {
+				continue;
+			}
+			const candidate = model as {
+				baseUrl?: string;
+				contextWindow?: number;
+				maxTokens?: number;
+			};
+			const limits = {
+				contextWindow: toPositiveNumber(candidate.contextWindow),
+				maxTokens: toPositiveNumber(candidate.maxTokens),
+			};
+			if (limits.contextWindow === undefined && limits.maxTokens === undefined) {
+				continue;
+			}
+			if (targetBaseUrl && normalizeBaseUrl(candidate.baseUrl) === targetBaseUrl) {
+				exactMatches.push(limits);
+				continue;
+			}
+			fallbackMatches.push(limits);
 		}
 	}
 	return exactMatches[0] ?? fallbackMatches[0];
@@ -106,6 +178,64 @@ export function resolveRuntimeModelInput(
 		return fromBuiltins;
 	}
 	return inferInputFromModelId(modelId);
+}
+
+export function resolveRuntimeModelLimits(input: {
+	config?: RuntimeModelsConfig;
+	providerId: string;
+	modelId: string;
+	api?: string;
+	baseUrl?: string;
+}): RuntimeModelLimits | undefined {
+	const provider = input.config?.providers?.[input.providerId];
+	const entry = provider?.models?.find((candidate) => candidate.id === input.modelId);
+	const fromEntry = normalizeRuntimeModelLimits(entry);
+	if (fromEntry) {
+		return fromEntry;
+	}
+	return inferLimitsFromBuiltins({
+		modelId: input.modelId,
+		api: input.api ?? provider?.api,
+		baseUrl: input.baseUrl ?? provider?.baseUrl,
+	});
+}
+
+export function extractRuntimeModelLimits(value: unknown): RuntimeModelLimits | undefined {
+	if (!value || typeof value !== "object") {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	const contextWindow = pickPositiveNumber([
+		record.contextWindow,
+		record.context_window,
+		record.context_length,
+		record.max_context_length,
+		record.max_input_tokens,
+		record.maxInputTokens,
+		typeof record.architecture === "object" && record.architecture !== null
+			? (record.architecture as Record<string, unknown>).context_length
+			: undefined,
+		typeof record.top_provider === "object" && record.top_provider !== null
+			? (record.top_provider as Record<string, unknown>).context_length
+			: undefined,
+	]);
+	const maxTokens = pickPositiveNumber([
+		record.maxTokens,
+		record.max_tokens,
+		record.max_completion_tokens,
+		record.max_output_tokens,
+		record.output_token_limit,
+		typeof record.top_provider === "object" && record.top_provider !== null
+			? (record.top_provider as Record<string, unknown>).max_completion_tokens
+			: undefined,
+	]);
+	if (contextWindow === undefined && maxTokens === undefined) {
+		return undefined;
+	}
+	return {
+		contextWindow,
+		maxTokens,
+	};
 }
 
 export function buildRuntimeModelEntryMetadata(input: {

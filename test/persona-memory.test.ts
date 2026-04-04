@@ -32,14 +32,48 @@ async function waitForBackgroundWork(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 30));
 }
 
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (error?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 describe("persona memory service", () => {
 	let tempHome: string;
 	const originalHome = process.env.HOME;
+	let fetchMock: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
 		tempHome = mkdtempSync(join(tmpdir(), "nekoclaw-persona-memory-"));
 		process.env.HOME = tempHome;
 		vi.resetModules();
+		fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith("/responses/input_tokens")) {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { input?: string };
+				return new Response(
+					JSON.stringify({
+						object: "response.input_tokens",
+						input_tokens: typeof body.input === "string" ? body.input.length : 0,
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url.endsWith("/v1/messages/count_tokens")) {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content?: string }> };
+				const text = body.messages?.[0]?.content ?? "";
+				return new Response(JSON.stringify({ input_tokens: text.length }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
 	});
 
 	afterEach(() => {
@@ -51,6 +85,7 @@ describe("persona memory service", () => {
 		rmSync(tempHome, { recursive: true, force: true });
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
 		vi.doUnmock("@mariozechner/pi-ai");
 	});
 
@@ -436,6 +471,134 @@ describe("persona memory service", () => {
 		expect(context.sceneObservations).toContain("这是失败场景里的 observation");
 		expect(context.selectedMemoryMarkdowns).toEqual([]);
 		expect(store.getAuditEntries(agent.agentId).some((entry) => entry.kind === "persona.selector_failed")).toBe(true);
+	});
+
+	it("consumes a queued selector prefetch without issuing a second selector request", async () => {
+		const completeMock = vi.fn(async () => ({
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify({
+						paths: ["memory/people/telegram-111.md"],
+					}),
+				},
+			],
+		}));
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "selector-prefetch-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "111",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: GPU 租赁平台项目负责人。",
+				"---",
+				"",
+				"小王在做 GPU 租赁平台。",
+			].join("\n"),
+		);
+		const event = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m-prefetch",
+			senderId: "111",
+			senderName: "小王",
+			text: "我是谁",
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		personaMemory.startSelectorPrefetch(agent, session, { jobId: "job-prefetch", event });
+		const context = await personaMemory.buildPreparedContext(agent, session, event, undefined, {
+			prefetchJobId: "job-prefetch",
+			allowPrefetchWait: true,
+		});
+
+		expect(context.selectedMemoryMarkdowns.map((entry) => entry.path)).toEqual(["memory/people/telegram-111.md"]);
+		expect(completeMock).toHaveBeenCalledTimes(1);
+		expect(
+			store
+				.getAuditEntries(agent.agentId)
+				.some((entry) => entry.kind === "persona.selector_prefetch_consumed" && entry.details.selectedCount === 1),
+		).toBe(true);
+	});
+
+	it("skips unfinished selector prefetches when waiting is disabled", async () => {
+		const gate = deferred<{
+			content: Array<{ type: "text"; text: string }>;
+		}>();
+		const completeMock = vi.fn(async () => await gate.promise);
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "selector-prefetch-skip-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "111",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: GPU 租赁平台项目负责人。",
+				"---",
+				"",
+				"小王在做 GPU 租赁平台。",
+			].join("\n"),
+		);
+		const event = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m-prefetch-skip",
+			senderId: "111",
+			senderName: "小王",
+			text: "我是谁",
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		personaMemory.startSelectorPrefetch(agent, session, { jobId: "job-prefetch-skip", event });
+		const context = await personaMemory.buildPreparedContext(agent, session, event, undefined, {
+			prefetchJobId: "job-prefetch-skip",
+			allowPrefetchWait: false,
+		});
+
+		expect(context.selectedMemoryMarkdowns).toEqual([]);
+		expect(completeMock).toHaveBeenCalledTimes(1);
+		gate.resolve({
+			content: [{ type: "text", text: JSON.stringify({ paths: ["memory/people/telegram-111.md"] }) }],
+		});
 	});
 
 	it("skips selector when the current message has no text content", async () => {

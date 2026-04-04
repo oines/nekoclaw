@@ -1,5 +1,6 @@
 import { parseAddressedSlashCommand } from "../command-parsing.js";
 import { summarizeBlocks } from "../messages.js";
+import type { CountTextTokens } from "./persona-memory/observations.js";
 import type { ChatKind, ChannelType, InboundMessageEvent, ReplyPayload, SessionRecord } from "../types.js";
 import { FORMATION_TIMELINE_MAX_EVENTS, FORMATION_TIMELINE_TOKEN_BUDGET } from "./persona-memory/constants.js";
 
@@ -29,10 +30,6 @@ export interface SessionBotOutboundLogEntry {
 }
 
 export type SessionLogEntry = SessionInboundLogEntry | SessionBotOutboundLogEntry;
-
-function estimateTokens(value: string): number {
-	return Math.ceil(value.length / 4);
-}
 
 function toExposedChannelType(channelType: ChannelType): string {
 	return channelType === "napcat" ? "qq" : channelType;
@@ -142,28 +139,44 @@ function formatTimelineTurn(header: string, lines: string[]): string | undefined
 	return `${header}\n${lines.join("\n")}`;
 }
 
-function takeTailTurnsWithinBudget(turns: string[], maxEvents = FORMATION_TIMELINE_MAX_EVENTS, tokenBudget = FORMATION_TIMELINE_TOKEN_BUDGET): string {
-	const selected: string[] = [];
-	let used = 0;
-	for (let index = turns.length - 1; index >= 0; index -= 1) {
-		const turn = turns[index]!;
-		const cost = estimateTokens(turn) + 1;
-		if (selected.length >= maxEvents || used + cost > tokenBudget) {
-			break;
-		}
-		selected.unshift(turn);
-		used += cost;
+async function takeTailTurnsWithinBudget(
+	turns: string[],
+	maxEvents = FORMATION_TIMELINE_MAX_EVENTS,
+	tokenBudget = FORMATION_TIMELINE_TOKEN_BUDGET,
+	countTextTokens?: CountTextTokens,
+): Promise<string> {
+	const capped = turns.slice(-maxEvents);
+	const joined = capped.join("\n\n");
+	if (!joined || !countTextTokens) {
+		return joined;
 	}
-	return selected.join("\n\n");
+	const total = await countTextTokens(joined);
+	if (!total.available || total.tokens <= tokenBudget) {
+		return joined;
+	}
+	let low = 0;
+	let high = capped.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		const candidate = capped.slice(-mid).join("\n\n");
+		const counted = await countTextTokens(candidate);
+		if (counted.available && counted.tokens <= tokenBudget) {
+			low = mid;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return capped.slice(-low).join("\n\n");
 }
 
-export function buildFormationTimeline(input: {
+export async function buildFormationTimeline(input: {
 	logEntries: SessionLogEntry[];
 	currentEvent: InboundMessageEvent;
 	fallbackBotPayloads?: ReplyPayload[];
 	maxEvents?: number;
 	tokenBudget?: number;
-}): string {
+	countTextTokens?: CountTextTokens;
+}): Promise<string> {
 	const turns: string[] = [];
 	const seenBotPayloads = new Set<string>();
 
@@ -206,5 +219,5 @@ export function buildFormationTimeline(input: {
 		seenBotPayloads.add(signature);
 	}
 
-	return takeTailTurnsWithinBudget(turns, input.maxEvents, input.tokenBudget);
+	return await takeTailTurnsWithinBudget(turns, input.maxEvents, input.tokenBudget, input.countTextTokens);
 }

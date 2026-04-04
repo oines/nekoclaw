@@ -1,47 +1,79 @@
 import { createHash } from "node:crypto";
 import { summarizeBlocks } from "../../messages.js";
+import type { TokenCountResult } from "../token-service.js";
 import type { InboundMessageEvent, ReplyPayload, SessionRecord } from "../../types.js";
 import { FORMATION_MAX_WAIT_MS, FORMATION_MIN_OBSERVATION_LINES, SCENE_OBSERVATION_MAX_LINES, SCENE_OBSERVATION_TOKEN_BUDGET } from "./constants.js";
 
-function estimateTokens(value: string): number {
-	return Math.ceil(value.length / 4);
+export type CountTextTokens = (value: string) => Promise<TokenCountResult>;
+
+async function fitLargestPrefix(lines: string[], budget: number, countTextTokens: CountTextTokens | undefined): Promise<string> {
+	const joined = lines.join("\n").trim();
+	if (!joined || !countTextTokens) {
+		return joined;
+	}
+	const total = await countTextTokens(joined);
+	if (!total.available || total.tokens <= budget) {
+		return joined;
+	}
+	let low = 0;
+	let high = lines.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		const candidate = lines.slice(0, mid).join("\n").trim();
+		const counted = await countTextTokens(candidate);
+		if (counted.available && counted.tokens <= budget) {
+			low = mid;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return lines.slice(0, low).join("\n").trim();
 }
 
-export function trimToTokenBudget(value: string, budget: number): string {
-	if (estimateTokens(value) <= budget) {
+async function fitLargestTail(lines: string[], budget: number, countTextTokens: CountTextTokens | undefined): Promise<string> {
+	const joined = lines.join("\n");
+	if (!joined || !countTextTokens) {
+		return joined;
+	}
+	const total = await countTextTokens(joined);
+	if (!total.available || total.tokens <= budget) {
+		return joined;
+	}
+	let low = 0;
+	let high = lines.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		const candidate = lines.slice(-mid).join("\n");
+		const counted = await countTextTokens(candidate);
+		if (counted.available && counted.tokens <= budget) {
+			low = mid;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return lines.slice(-low).join("\n");
+}
+
+export async function trimToTokenBudget(value: string, budget: number, countTextTokens?: CountTextTokens): Promise<string> {
+	if (!countTextTokens || !value.trim()) {
 		return value;
 	}
 	const lines = value.split(/\r?\n/);
-	const kept: string[] = [];
-	let used = 0;
-	for (const line of lines) {
-		const lineCost = estimateTokens(line) + 1;
-		if (used + lineCost > budget) {
-			break;
-		}
-		kept.push(line);
-		used += lineCost;
-	}
-	return kept.join("\n").trim();
+	return await fitLargestPrefix(lines, budget, countTextTokens);
 }
 
-export function takeTailLinesWithinBudget(value: string, maxLines = SCENE_OBSERVATION_MAX_LINES, tokenBudget = SCENE_OBSERVATION_TOKEN_BUDGET): string {
+export async function takeTailLinesWithinBudget(
+	value: string,
+	maxLines = SCENE_OBSERVATION_MAX_LINES,
+	tokenBudget = SCENE_OBSERVATION_TOKEN_BUDGET,
+	countTextTokens?: CountTextTokens,
+): Promise<string> {
 	const lines = value
 		.split(/\r?\n/)
 		.map((line) => line.trimEnd())
 		.filter((line) => line.length > 0);
-	const selected: string[] = [];
-	let used = 0;
-	for (let index = lines.length - 1; index >= 0; index -= 1) {
-		const line = lines[index]!;
-		const cost = estimateTokens(line) + 1;
-		if (selected.length >= maxLines || used + cost > tokenBudget) {
-			break;
-		}
-		selected.unshift(line);
-		used += cost;
-	}
-	return selected.join("\n");
+	const capped = lines.slice(-maxLines);
+	return await fitLargestTail(capped, tokenBudget, countTextTokens);
 }
 
 function slugSegment(value: string | undefined): string {

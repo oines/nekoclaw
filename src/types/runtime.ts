@@ -47,6 +47,10 @@ export interface RunJob {
 	};
 }
 
+export interface JobExecutionContext {
+	allowPersonaPrefetchWait: boolean;
+}
+
 export interface QueueEvent {
 	type: "enqueue" | "start" | "complete" | "fail";
 	jobId: string;

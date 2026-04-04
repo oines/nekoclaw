@@ -2690,6 +2690,7 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 	const fetchRegistry = installFetchRegistry();
 	const plugins = new Map<string, ChannelPlugin>();
 	const outboundDispatch = new OutboundDispatchService(store, plugins);
+	const personaMemory = new PersonaMemoryService(store);
 	const containerStartLocks = new Map<string, Promise<string>>();
 	const drivers = new Map<Exclude<HarnessChannel, "both">, HarnessDriver>();
 	const requestedChannels: Array<Exclude<HarnessChannel, "both">> =
@@ -2727,13 +2728,14 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 							}
 						}
 					},
+					personaMemory,
 				)
 			: undefined;
 	const jobQueue = new JobQueueService(
 		store,
 		new Map<string, Map<string, RunJob[]>>(),
 		new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>(),
-		async (job) => {
+		async (job, context) => {
 			if (options.executeJob) {
 				const result = await options.executeJob(job, {
 					store,
@@ -2765,12 +2767,27 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 				return result;
 			}
 			assertCondition(workerRunner, "Expected a worker runner when executeJob override is not provided");
-			return workerRunner.runJob(job);
+			return workerRunner.runJob(job, context);
+		},
+		{
+			onEnqueued: (job) => {
+				if (job.kind !== "inbound") {
+					return;
+				}
+				const currentAgent = store.getAgentByRef(job.agentId);
+				const session = store.getSession(currentAgent.agentId, job.sessionRecordId);
+				personaMemory.startSelectorPrefetch(currentAgent, session, job);
+			},
+			onRemoved: (jobs) => {
+				for (const job of jobs) {
+					personaMemory.clearSelectorPrefetch(job.agentId, job.jobId);
+				}
+			},
 		},
 	);
 	jobQueue.initialize();
 	const commands = new CommandRouterService(store, (agentId) => jobQueue.getStatus(agentId));
-	const messageRouter = new MessageRouterService(store, plugins, commands, (job) => jobQueue.enqueue(job));
+	const messageRouter = new MessageRouterService(store, plugins, commands, (job) => jobQueue.enqueue(job), personaMemory);
 	for (const [channel, driver] of drivers.entries()) {
 		driver.plugin.startPolling({
 			onEvent: async (event) => {

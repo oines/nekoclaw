@@ -115,7 +115,7 @@ describe("buildFormationTurnTranscript", () => {
 			],
 		};
 
-		const transcript = buildFormationTurnTranscript(
+		const transcript = await buildFormationTurnTranscript(
 			{
 				getSessionLogPath: () => logPath,
 			} as any,
@@ -191,7 +191,7 @@ describe("buildFormationTurnTranscript", () => {
 			],
 		};
 
-		const transcript = buildFormationTurnTranscript(
+		const transcript = await buildFormationTurnTranscript(
 			{
 				getSessionLogPath: () => logPath,
 			} as any,

@@ -3,7 +3,7 @@ import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV, NEKOCLAW_NAME } from "../../config.js";
 import type { AgentSpec, ModelConfig } from "../../types.js";
 import type { RuntimeModelsConfig } from "../../model/model-types.js";
-import { probeProxyProtocol, upsertRuntimeModelsConfig } from "../../model/probe.js";
+import { fetchProxyModelCatalog, probeProxyProtocol, upsertRuntimeModelsConfig } from "../../model/probe.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import { ask, requireValue, type ModelSetOptions } from "./shared.js";
 
@@ -43,15 +43,8 @@ function uniqueSorted(values: string[]): string[] {
 	return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
 
-async function fetchCustomModelIds(baseUrl: string, apiKey: string | undefined): Promise<string[]> {
-	const normalized = baseUrl.replace(/\/+$/, "");
-	const headers = apiKey ? { authorization: `Bearer ${apiKey}` } : undefined;
-	const response = await fetch(`${normalized}/models`, { headers });
-	if (!response.ok) {
-		return [];
-	}
-	const payload = (await response.json()) as { data?: Array<{ id?: string }> };
-	return uniqueSorted((payload.data ?? []).map((entry) => entry.id).filter(Boolean) as string[]);
+async function fetchCustomModelCatalog(baseUrl: string, apiKey: string | undefined) {
+	return fetchProxyModelCatalog(baseUrl, apiKey);
 }
 
 export function providerNames(): string[] {
@@ -176,16 +169,17 @@ export async function configureCustomModel(agentRef: string, store: JsonNekoclaw
 
 	const s = p.spinner();
 	s.start("Fetching available models...");
-	const listedModels = await fetchCustomModelIds(baseUrl, apiKey || undefined);
+	const listedModels = await fetchCustomModelCatalog(baseUrl, apiKey || undefined);
 	s.stop("Model list fetched");
+	const listedModelIds = uniqueSorted(listedModels.map((entry) => entry.id));
 
 	const modelId = (options.model ||
 		(await p.select({
 			message: "Select a model",
-			options: listedModels.length > 0
-				? listedModels.map((m) => ({ value: m, label: m }))
+			options: listedModelIds.length > 0
+				? listedModelIds.map((m) => ({ value: m, label: m }))
 				: [{ value: "manual", label: "Enter model ID manually" }],
-			initialValue: listedModels[0],
+			initialValue: listedModelIds[0],
 		}))) as string;
 
 	if (p.isCancel(modelId)) {
@@ -209,6 +203,7 @@ export async function configureCustomModel(agentRef: string, store: JsonNekoclaw
 		modelId: finalModelId,
 	});
 	s.stop("Probe successful");
+	const discoveredModel = listedModels.find((entry) => entry.id === finalModelId);
 
 	const updatedAgent = store.setCustomModelConfig(agent.agentId, {
 		baseUrl: baseUrl.replace(/\/+$/, ""),
@@ -229,6 +224,9 @@ export async function configureCustomModel(agentRef: string, store: JsonNekoclaw
 		provider: updatedAgent.provider,
 		apiKeyEnv: NEKOCLAW_CUSTOM_MODEL_API_KEY_ENV,
 		modelId: finalModelId,
+		name: discoveredModel?.name,
+		contextWindow: discoveredModel?.contextWindow,
+		maxTokens: discoveredModel?.maxTokens,
 	});
 	store.writeRuntimeModelsConfig(updatedAgent.agentId, config, {
 		baseUrl,
