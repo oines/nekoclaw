@@ -60,6 +60,7 @@ export class MessageRouterService {
 					})
 				: event;
 		const parsedCommand = parseAddressedSlashCommand(hydratedEvent);
+		const isStopCommand = parsedCommand?.command === "stop";
 		const canProcessNormally = plugin?.triggering.shouldProcessEvent(hydratedEvent) ?? true;
 		if (session) {
 			if (hydratedEvent.chatKind === "group" && hydratedEvent.chatTitle?.trim()) {
@@ -85,10 +86,10 @@ export class MessageRouterService {
 				this.personaMemory.recordInbound(agent.agentId, session, hydratedEvent);
 			}
 		}
-		if (plugin && canProcessNormally && (await this.commands.handleCommand(agent, plugin, hydratedEvent, session))) {
+		if (plugin && (canProcessNormally || isStopCommand) && (await this.commands.handleCommand(agent, plugin, hydratedEvent, session))) {
 			return;
 		}
-		if (plugin && !canProcessNormally) {
+		if (plugin && !canProcessNormally && !isStopCommand) {
 			this.store.audit(agent.agentId, `${channel.type}.ignored`, {
 				chatId: event.chatId,
 				messageId: event.messageId,

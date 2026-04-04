@@ -228,7 +228,79 @@ describe("runtime command router", () => {
 		expect(text).toContain("/help - Show this command list");
 		expect(text).toContain("/status - Show session status and your platform user id");
 		expect(text).toContain("/pair - Pair the current chat if it is not paired yet");
+		expect(text).toContain("/stop - Clear queued follow-up tasks for the current session");
 		expect(text).toContain("/trigger mention - Trigger only on mentions for this channel");
+	});
+
+	it("clears queued follow-up tasks for the current session through /stop", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "stop-cat" });
+		const agent = store.setBuiltinModelConfig("stop-cat", { provider: "openai", modelId: "gpt-5" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "123",
+			chatKind: "dm",
+		});
+		const reply = vi.fn(async () => []);
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 2, hadQueuedWork: true }));
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }), stopSession);
+
+		const handled = await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "199",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/stop" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			session,
+		);
+
+		expect(handled).toBe(true);
+		expect(stopSession).toHaveBeenCalledWith(agent.agentId, session.sessionRecordId);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("已停止当前会话的后续任务：清除了 2 个排队任务。");
+	});
+
+	it("returns a no-op message for /stop when the chat is not paired", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "stop-unpaired-cat" });
+		const agent = store.setBuiltinModelConfig("stop-unpaired-cat", { provider: "openai", modelId: "gpt-5" });
+		const reply = vi.fn(async () => []);
+		const stopSession = vi.fn(() => ({ removedQueuedCount: 0, hadQueuedWork: false }));
+		const router = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }), stopSession);
+
+		const handled = await router.handleCommand(
+			agent,
+			{
+				actions: { reply },
+			} as never,
+			{
+				eventType: "message.created",
+				channelType: "telegram",
+				chatId: "123",
+				chatKind: "dm",
+				messageId: "200",
+				sender: { externalId: "777", displayName: "Alice" },
+				blocks: [{ kind: "text", text: "/stop" }],
+				occurredAt: "2026-03-29T00:00:00.000Z",
+			},
+			undefined,
+		);
+
+		expect(handled).toBe(true);
+		expect(stopSession).not.toHaveBeenCalled();
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("当前会话没有正在排队的任务。");
 	});
 
 	it("creates a real pair prompt for an unpaired /pair command", async () => {

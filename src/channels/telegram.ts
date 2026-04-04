@@ -109,6 +109,7 @@ const TELEGRAM_DM_COMMANDS = [
 	{ command: "help", description: "Show available chat commands" },
 	{ command: "status", description: "Show session status and your platform user id" },
 	{ command: "pair", description: "Start pairing this chat with an agent" },
+	{ command: "stop", description: "Clear queued follow-up tasks for this session" },
 	{ command: "reset", description: "Reset the current session (admin only)" },
 	{ command: "model", description: "Change the session or agent model (admin only)" },
 ] as const;
@@ -117,6 +118,7 @@ const TELEGRAM_GROUP_COMMANDS = [
 	{ command: "help", description: "Show available chat commands" },
 	{ command: "pair", description: "Pair this group with the agent" },
 	{ command: "status", description: "Show session status in this chat" },
+	{ command: "stop", description: "Clear queued follow-up tasks for this session" },
 	{ command: "trigger", description: "Change group trigger mode (admin only)" },
 	{ command: "reset", description: "Reset the current session (admin only)" },
 	{ command: "model", description: "Change the session or agent model (admin only)" },

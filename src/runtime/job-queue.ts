@@ -70,6 +70,31 @@ export class JobQueueService {
 		this.activeRunsByAgent.delete(agentId);
 	}
 
+	stopSession(agentId: string, sessionRecordId: string): { removedQueuedCount: number; hadQueuedWork: boolean } {
+		const sessionQueues = this.agentQueues.get(agentId);
+		const queue = sessionQueues?.get(sessionRecordId);
+		if (!sessionQueues || !queue || queue.length === 0) {
+			return { removedQueuedCount: 0, hadQueuedWork: false };
+		}
+		const isActiveSession = this.getActiveRuns(agentId).has(sessionRecordId);
+		const removedQueuedCount = isActiveSession ? Math.max(0, queue.length - 1) : queue.length;
+		if (removedQueuedCount === 0) {
+			return { removedQueuedCount: 0, hadQueuedWork: false };
+		}
+		if (isActiveSession) {
+			queue.splice(1);
+		} else {
+			sessionQueues.delete(sessionRecordId);
+		}
+		this.compactQueueLog(agentId, sessionQueues);
+		this.store.audit(agentId, "queue.stop_session", {
+			sessionRecordId,
+			removedQueuedCount,
+			running: isActiveSession,
+		});
+		return { removedQueuedCount, hadQueuedWork: true };
+	}
+
 	compactQueueLog(agentId: string, sessionQueues = this.agentQueues.get(agentId) ?? new Map<string, RunJob[]>()): void {
 		const events: QueueEvent[] = [];
 		for (const jobs of sessionQueues.values()) {

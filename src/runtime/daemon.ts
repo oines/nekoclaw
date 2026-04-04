@@ -40,7 +40,11 @@ export class NekoclawDaemon {
 		this.personaMemory = new PersonaMemoryService(this.store);
 		this.workerRunner = new WorkerRunnerService(this.store, this.outboundDispatch, this.channelPlugins, (agentRef) => this.startAgentContainer(agentRef));
 		this.jobQueue = new JobQueueService(this.store, this.agentQueues, this.activeRunsByAgent, (job) => this.workerRunner.runJob(job));
-		const commands = new CommandRouterService(this.store, (agentId) => this.jobQueue.getStatus(agentId));
+		const commands = new CommandRouterService(
+			this.store,
+			(agentId) => this.jobQueue.getStatus(agentId),
+			(agentId, sessionRecordId) => this.jobQueue.stopSession(agentId, sessionRecordId),
+		);
 		this.messageRouter = new MessageRouterService(this.store, this.channelPlugins, commands, (job) => this.jobQueue.enqueue(job));
 		this.channelRuntime = new ChannelRuntimeService(this.store, this.channelPlugins, getRuntimeKey, (agentId, channelType, event) =>
 			this.messageRouter.handleInbound(agentId, channelType, event),

@@ -22,6 +22,7 @@ type ParsedCommand =
 	| { kind: "pair" }
 	| { kind: "help" }
 	| { kind: "status" }
+	| { kind: "stop" }
 	| { kind: "reset" }
 	| { kind: "model"; scope: "session" | "global"; provider: string; modelId: string }
 	| { kind: "trigger"; mode: "all" | "mention" | "" };
@@ -32,6 +33,10 @@ export class CommandRouterService {
 	constructor(
 		private readonly store: JsonNekoclawStore,
 		private readonly getQueueStatus: (agentId: string) => QueueStatus,
+		private readonly stopSession: (agentId: string, sessionRecordId: string) => { removedQueuedCount: number; hadQueuedWork: boolean } = () => ({
+			removedQueuedCount: 0,
+			hadQueuedWork: false,
+		}),
 	) {}
 
 	async handleCommand(
@@ -90,6 +95,21 @@ export class CommandRouterService {
 				}
 				await this.reply(plugin, event, {
 					text: this.buildStatusText(agent, event, session, isAdmin),
+				});
+				return true;
+			case "stop":
+				if (!session) {
+					await this.reply(plugin, event, {
+						text: "当前会话没有正在排队的任务。",
+					});
+					return true;
+				}
+				const stopResult = this.stopSession(agent.agentId, session.sessionRecordId);
+				await this.reply(plugin, event, {
+					text:
+						stopResult.removedQueuedCount > 0
+							? `已停止当前会话的后续任务：清除了 ${stopResult.removedQueuedCount} 个排队任务。`
+							: "当前会话没有正在排队的任务。",
 				});
 				return true;
 			case "trigger":
@@ -186,6 +206,8 @@ export class CommandRouterService {
 				return { kind: "help" };
 			case "status":
 				return { kind: "status" };
+			case "stop":
+				return { kind: "stop" };
 			case "trigger": {
 				const mode = args[0];
 				if (mode === "all" || mode === "mention") {
@@ -304,6 +326,7 @@ export class CommandRouterService {
 			"/help - Show this command list",
 			"/status - Show session status and your platform user id",
 			"/pair - Pair the current chat if it is not paired yet",
+			"/stop - Clear queued follow-up tasks for the current session",
 		];
 		if (isAdmin) {
 			lines.push("/reset - Reset the current session");

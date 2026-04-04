@@ -241,4 +241,54 @@ describe("job queue", () => {
 			runningSessions: 0,
 		});
 	});
+
+	it("clears all queued jobs for an idle session through stopSession", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const store = new JsonNekoclawStore();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const agent = store.createAgent({ slug: "stop-idle-cat" });
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async () => ({ outbound: {} }));
+		const sessionQueues = new Map<string, RunJob[]>();
+		const a1 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:00.000Z", "a");
+		const a2 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:01.000Z", "a");
+		const b1 = createJob(agent.agentId, "session-b", "2026-03-29T00:00:02.000Z", "b");
+		sessionQueues.set("session-a", [a1, a2]);
+		sessionQueues.set("session-b", [b1]);
+		queues.set(agent.agentId, sessionQueues);
+
+		const result = queue.stopSession(agent.agentId, "session-a");
+
+		expect(result).toEqual({ removedQueuedCount: 2, hadQueuedWork: true });
+		expect(queues.get(agent.agentId)?.has("session-a")).toBe(false);
+		expect(queues.get(agent.agentId)?.get("session-b")).toEqual([b1]);
+		expect(store.recoverPendingJobs(agent.agentId)).toEqual([b1]);
+	});
+
+	it("preserves the current running job and clears only tail jobs for an active session", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const store = new JsonNekoclawStore();
+		const queues = new Map<string, Map<string, RunJob[]>>();
+		const activeRunsByAgent = new Map<string, Map<string, { sessionRecordId: string; jobId: string; startedAt: string }>>();
+		const agent = store.createAgent({ slug: "stop-active-cat" });
+		const queue = new JobQueueService(store, queues, activeRunsByAgent, async () => ({ outbound: {} }));
+		const a1 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:00.000Z", "a");
+		const a2 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:01.000Z", "a");
+		const a3 = createJob(agent.agentId, "session-a", "2026-03-29T00:00:02.000Z", "a");
+		const b1 = createJob(agent.agentId, "session-b", "2026-03-29T00:00:03.000Z", "b");
+		queues.set(agent.agentId, new Map([
+			["session-a", [a1, a2, a3]],
+			["session-b", [b1]],
+		]));
+		activeRunsByAgent.set(agent.agentId, new Map([
+			["session-a", { sessionRecordId: "session-a", jobId: a1.jobId, startedAt: "2026-03-29T00:00:10.000Z" }],
+		]));
+
+		const result = queue.stopSession(agent.agentId, "session-a");
+
+		expect(result).toEqual({ removedQueuedCount: 2, hadQueuedWork: true });
+		expect(queues.get(agent.agentId)?.get("session-a")).toEqual([a1]);
+		expect(queues.get(agent.agentId)?.get("session-b")).toEqual([b1]);
+		expect(store.recoverPendingJobs(agent.agentId)).toEqual([a1, b1]);
+	});
 });

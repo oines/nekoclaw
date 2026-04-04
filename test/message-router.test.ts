@@ -362,6 +362,136 @@ describe("message router", () => {
 		expect(files).toEqual([]);
 	});
 
+	it("handles bare /stop even when the channel trigger would normally ignore the message", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { MessageRouterService } = await import("../src/runtime/message-router.js");
+
+		const store = new JsonNekoclawStore();
+		store.createAgent({ slug: "stop-bypass-cat" });
+		const agent = store.setBuiltinModelConfig("stop-bypass-cat", { provider: "openai", modelId: "gpt-5" });
+		store.createChannel(agent.agentId, "telegram");
+		store.setChannelToken(agent.agentId, "telegram", "token");
+		store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "-1003",
+			chatKind: "group",
+		});
+
+		const reply = vi.fn(async () => []);
+		const enqueue = vi.fn(async () => undefined);
+		const plugin: ChannelPlugin = {
+			type: "telegram",
+			capabilities: { text: true, media: true, reply: true, edit: true, delete: true, typing: true },
+			outbound: { send: async () => [] },
+			actions: {
+				send: async () => [],
+				reply,
+				edit: async () => undefined,
+				delete: async () => undefined,
+				typing: async () => undefined,
+			},
+			threading: { resolveReplyMode: () => "off", applyReplyMode: (payload) => payload },
+			pairing: {
+				shouldOfferPair: () => false,
+				buildPairPrompt: () => ({}),
+				buildPairAccepted: () => ({}),
+				buildPairRejected: () => ({}),
+			},
+			triggering: { shouldProcessEvent: () => false },
+			resolveSessionAddress: () => ({
+				channelType: "telegram",
+				externalConversationId: "-1003",
+				chatKind: "group",
+			}),
+			startPolling: () => undefined,
+			stop: () => undefined,
+		};
+		const plugins = new Map<string, ChannelPlugin>();
+		plugins.set(getRuntimeKey(agent.agentId, "telegram"), plugin);
+		const commands = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+		const router = new MessageRouterService(store, plugins, commands, enqueue);
+
+		await router.handleInbound(agent.agentId, "telegram", {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId: "-1003",
+			chatKind: "group",
+			messageId: "16",
+			sender: { externalId: "3184675714" },
+			blocks: [{ kind: "text", text: "/stop" }],
+			occurredAt: "2026-03-29T00:00:00.000Z",
+		});
+
+		expect(reply).toHaveBeenCalledTimes(1);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("当前会话没有正在排队的任务。");
+		expect(enqueue).not.toHaveBeenCalled();
+	});
+
+	it("does not try to pair an unpaired chat for bare /stop", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { CommandRouterService } = await import("../src/runtime/command-router.js");
+		const { MessageRouterService } = await import("../src/runtime/message-router.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "stop-unpaired-bypass-cat" });
+		store.createChannel(agent.agentId, "telegram");
+		store.setChannelToken(agent.agentId, "telegram", "token");
+
+		const reply = vi.fn(async () => []);
+		const send = vi.fn(async () => []);
+		const buildPairPrompt = vi.fn(() => ({}));
+		const enqueue = vi.fn(async () => undefined);
+		const plugin: ChannelPlugin = {
+			type: "telegram",
+			capabilities: { text: true, media: true, reply: true, edit: true, delete: true, typing: true },
+			outbound: { send: async () => [] },
+			actions: {
+				send,
+				reply,
+				edit: async () => undefined,
+				delete: async () => undefined,
+				typing: async () => undefined,
+			},
+			threading: { resolveReplyMode: () => "off", applyReplyMode: (payload) => payload },
+			pairing: {
+				shouldOfferPair: () => true,
+				buildPairPrompt,
+				buildPairAccepted: () => ({}),
+				buildPairRejected: () => ({}),
+			},
+			triggering: { shouldProcessEvent: () => false },
+			resolveSessionAddress: () => ({
+				channelType: "telegram",
+				externalConversationId: "-1004",
+				chatKind: "group",
+			}),
+			startPolling: () => undefined,
+			stop: () => undefined,
+		};
+		const plugins = new Map<string, ChannelPlugin>();
+		plugins.set(getRuntimeKey(agent.agentId, "telegram"), plugin);
+		const commands = new CommandRouterService(store, () => ({ queued: 0, processing: false, currentJobId: undefined }));
+		const router = new MessageRouterService(store, plugins, commands, enqueue);
+
+		await router.handleInbound(agent.agentId, "telegram", {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId: "-1004",
+			chatKind: "group",
+			messageId: "17",
+			sender: { externalId: "3184675714" },
+			blocks: [{ kind: "text", text: "/stop" }],
+			occurredAt: "2026-03-29T00:00:00.000Z",
+		});
+
+		expect(reply).toHaveBeenCalledTimes(1);
+		expect(reply.mock.calls[0]?.[0]?.payload?.text).toBe("当前会话没有正在排队的任务。");
+		expect(send).not.toHaveBeenCalled();
+		expect(buildPairPrompt).not.toHaveBeenCalled();
+		expect(enqueue).not.toHaveBeenCalled();
+	});
+
 	it("does not write an observation for an unpaired message", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");
