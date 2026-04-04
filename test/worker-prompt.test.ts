@@ -127,18 +127,53 @@ describe("worker append prompt", () => {
 			...createPayload("telegram"),
 			personaContext: {
 				indexMarkdown: "## 我认识的人\n- 小王：毕业论文相关 → memory/people/telegram-111.md",
+				selectedMemoryMarkdowns: [
+					{
+						path: "memory/people/telegram-111.md",
+						kind: "people",
+						title: "小王",
+						description: "毕业论文相关，之前聊过数据库。",
+						markdown: "# 小王\n\n小王最近还在写毕业论文。",
+					},
+				],
 				sceneObservations: "[2026-04-01T00:00:00.000Z] telegram:111 小王: 支付接口又挂了",
 			},
 		};
 
 		const prompt = buildAppendPrompt(payload, "", "");
 		expect(prompt).toContain("## Persona Index");
+		expect(prompt).toContain("## Selected Persona Memories");
+		expect(prompt).toContain("### memory/people/telegram-111.md");
 		expect(prompt).toContain("## Current Scene Observations");
 		expect(prompt).toContain("`SOUL.md` is the primary source for your style, voice, and personality.");
+		expect(prompt).toContain("check `index.md` first");
+		expect(prompt).toContain("read the 1-3 most relevant detailed files");
+		expect(prompt).toContain("Strong recall triggers include phrases like \"还记得\", \"上次\", \"之前\"");
 		expect(prompt).toContain("use the built-in `read` tool");
-		expect(prompt).toContain("file path referenced in index.md");
+		expect(prompt).toContain("Do not guess or rely on index-level summaries alone");
+		expect(prompt).toContain("If Current Scene Observations already contain the answer, summarize those observed facts directly");
+		expect(prompt).toContain("Do not invent facts beyond what Persona memories or Current Scene Observations support.");
+		expect(prompt).toContain("Never turn passive observations into \"we discussed\"");
+		expect(prompt).toContain("Do not lead with cute filler, roleplay deflection");
+		expect(prompt).toContain("Preserve source distinctions");
+		expect(prompt).toContain("The user asks \"你之前答应过我默认用哪个方案\"");
 		expect(prompt).not.toContain("## Persona Selection Notes");
+		expect(prompt).not.toContain("## Current Scene Memory");
+	});
+
+	it("omits selected memory section when no detailed memory files were preloaded", () => {
+		const payload: WorkerPayload = {
+			...createPayload("telegram"),
+			personaContext: {
+				indexMarkdown: "## 我认识的人\n- 小王：毕业论文相关 → memory/people/telegram-111.md",
+				selectedMemoryMarkdowns: [],
+				sceneObservations: "[2026-04-01T00:00:00.000Z] telegram:111 小王: 支付接口又挂了",
+			},
+		};
+
+		const prompt = buildAppendPrompt(payload, "", "");
 		expect(prompt).not.toContain("## Selected Persona Memories");
+		expect(prompt).not.toContain("## Current Scene Memory");
 	});
 
 	it("mentions scheduled reminder context when present", () => {

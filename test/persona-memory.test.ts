@@ -116,17 +116,36 @@ describe("persona memory service", () => {
 		expect(context.sceneObservations).toContain("支付接口又挂了");
 		expect(context.sceneObservations).toContain("我看看日志，应该是超时");
 		expect(context.indexMarkdown).toBe("");
+		expect(context.selectedMemoryMarkdowns).toEqual([]);
 		const observationPath = store.getPersonaObservationPath(agent.slug, "telegram-group-1001");
 		expect(readFileSync(observationPath, "utf-8")).toContain("群里刚才在聊什么？");
 	});
 
-	it("keeps index and scene observations in prepared context without preloading detailed memory files", async () => {
+	it("calls the selector with only sender, message, and manifest, then preloads the selected memory files", async () => {
+		const completeMock = vi.fn(async () => ({
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify({
+						paths: ["memory/people/telegram-111.md", "memory/scenes/telegram-group-abc.md"],
+					}),
+				},
+			],
+		}));
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
 		const { writeTextFile } = await import("../src/store/fs.js");
 
 		const store = new JsonNekoclawStore();
-		const agent = store.createAgent({ slug: "selector-cat" });
+		let agent = store.createAgent({ slug: "selector-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "111",
@@ -155,7 +174,28 @@ describe("persona memory service", () => {
 		);
 		writeTextFile(
 			join(store.getPersonaScenesDir(agent.slug), "telegram-group-abc.md"),
-			"技术吹水群最近在讨论数据库和项目架构。",
+			[
+				"---",
+				"title: 技术吹水群",
+				"description: 最近在讨论数据库和项目架构。",
+				"---",
+				"",
+				"技术吹水群最近在讨论数据库和项目架构。",
+			].join("\n"),
+		);
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "telegram",
+				chatId: "111",
+				chatKind: "dm",
+				messageId: "obs-1",
+				senderId: "111",
+				senderName: "小王",
+				text: "这是 observation 里的旧消息，不该喂给 selector",
+				occurredAt: "2026-04-02T00:00:00.000Z",
+			}),
 		);
 
 		const event = createEvent({
@@ -171,15 +211,165 @@ describe("persona memory service", () => {
 		personaMemory.recordInbound(agent.agentId, session, event);
 
 		const context = await personaMemory.buildPreparedContext(agent, session, event);
+		const selectorContext = completeMock.mock.calls[0]?.[1];
+		const selectorUserText =
+			selectorContext?.messages?.[0] && typeof selectorContext.messages[0].content === "string"
+				? selectorContext.messages[0].content
+				: "";
 
 		expect(context.indexMarkdown).toContain("GPU 租赁平台");
 		expect(context.indexMarkdown).toContain("memory/people/telegram-111.md");
 		expect(context.sceneObservations).toContain("上次数据库选型那个事你还记得吗");
+		expect(context.selectedMemoryMarkdowns.map((entry) => entry.path)).toEqual([
+			"memory/people/telegram-111.md",
+			"memory/scenes/telegram-group-abc.md",
+		]);
+		expect(context.selectedMemoryMarkdowns[0]?.markdown).toContain("数据库选型");
+		expect(context.selectedMemoryMarkdowns[1]?.markdown).toContain("技术吹水群最近在讨论数据库和项目架构");
+		expect(selectorUserText).toContain("Current sender: telegram:111 (小王)");
+		expect(selectorUserText).toContain("Message: 上次数据库选型那个事你还记得吗");
+		expect(selectorUserText).toContain("Available memory files:");
+		expect(selectorUserText).toContain("[people] memory/people/telegram-111.md");
+		expect(selectorUserText).toContain("[scene] memory/scenes/telegram-group-abc.md");
+		expect(selectorUserText).not.toContain("## 我认识的人");
+		expect(selectorUserText).not.toContain("这是 observation 里的旧消息，不该喂给 selector");
+		const audits = store.getAuditEntries(agent.agentId);
+		expect(audits.some((entry) => entry.kind === "persona.selector_applied" && entry.details.selectedCount === 2)).toBe(true);
 	});
 
-	it("does not make an extra model call when building prepared context", async () => {
+	it("filters invalid selector paths and keeps only valid selected memory files", async () => {
+		const completeMock = vi.fn(async () => ({
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify({
+						paths: ["memory/people/telegram-111.md", "memory/people/not-found.md"],
+					}),
+				},
+			],
+		}));
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "selector-filter-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "111",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: GPU 租赁平台项目负责人。",
+				"---",
+				"",
+				"小王在做 GPU 租赁平台。",
+			].join("\n"),
+		);
+
+		const event = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m-filter",
+			senderId: "111",
+			senderName: "小王",
+			text: "我是谁",
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		const context = await personaMemory.buildPreparedContext(agent, session, event);
+
+		expect(context.selectedMemoryMarkdowns.map((entry) => entry.path)).toEqual(["memory/people/telegram-111.md"]);
+		expect(completeMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns index and observations when selector times out, and records a timeout audit", async () => {
+		vi.useFakeTimers();
+		const completeMock = vi.fn(async () => await new Promise(() => undefined));
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "selector-timeout-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "111",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(store.getPersonaIndexPath(agent.slug), "## 我认识的人\n- 小王 → memory/people/telegram-111.md");
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: GPU 租赁平台项目负责人。",
+				"---",
+				"",
+				"小王在做 GPU 租赁平台。",
+			].join("\n"),
+		);
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "telegram",
+				chatId: "111",
+				chatKind: "dm",
+				messageId: "obs-timeout",
+				senderId: "111",
+				senderName: "小王",
+				text: "之前我们聊过数据库",
+				occurredAt: "2026-04-02T00:00:00.000Z",
+			}),
+		);
+		const event = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m-timeout",
+			senderId: "111",
+			senderName: "小王",
+			text: "上次那个事你还记得吗",
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		const contextPromise = personaMemory.buildPreparedContext(agent, session, event);
+		await vi.advanceTimersByTimeAsync(5_100);
+		const context = await contextPromise;
+
+		expect(context.indexMarkdown).toContain("memory/people/telegram-111.md");
+		expect(context.sceneObservations).toContain("之前我们聊过数据库");
+		expect(context.selectedMemoryMarkdowns).toEqual([]);
+		expect(store.getAuditEntries(agent.agentId).some((entry) => entry.kind === "persona.selector_timeout")).toBe(true);
+	});
+
+	it("returns index and observations when selector fails, and records a failure audit", async () => {
 		const completeMock = vi.fn(async () => {
-			throw new Error("selector should not be called");
+			throw new Error("selector boom");
 		});
 		vi.doMock("@mariozechner/pi-ai", async () => {
 			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
@@ -193,29 +383,108 @@ describe("persona memory service", () => {
 		const { writeTextFile } = await import("../src/store/fs.js");
 
 		const store = new JsonNekoclawStore();
-		let agent = store.createAgent({ slug: "selector-removed-cat" });
+		let agent = store.createAgent({ slug: "selector-fail-cat" });
 		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
 		const session = store.createSession(agent.agentId, {
 			channelType: "telegram",
 			externalConversationId: "111",
 			chatKind: "dm",
 		});
-		writeTextFile(store.getPersonaIndexPath(agent.slug), "## 我认识的人\n- 小王：GPU 租赁平台 → memory/people/telegram-111.md");
 		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(store.getPersonaIndexPath(agent.slug), "## 我认识的人\n- 小王 → memory/people/telegram-111.md");
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: GPU 租赁平台项目负责人。",
+				"---",
+				"",
+				"小王在做 GPU 租赁平台。",
+			].join("\n"),
+		);
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "telegram",
+				chatId: "111",
+				chatKind: "dm",
+				messageId: "obs-fail",
+				senderId: "111",
+				senderName: "小王",
+				text: "这是失败场景里的 observation",
+				occurredAt: "2026-04-02T00:00:00.000Z",
+			}),
+		);
 		const event = createEvent({
 			channelType: "telegram",
 			chatId: "111",
 			chatKind: "dm",
-			messageId: "m-no-selector",
+			messageId: "m-fail",
 			senderId: "111",
 			senderName: "小王",
-			text: "上次那个事你还记得吗",
+			text: "之前那个数据库选择怎么说来着",
 			occurredAt: "2026-04-03T00:00:00.000Z",
 		});
 
 		const context = await personaMemory.buildPreparedContext(agent, session, event);
 
 		expect(context.indexMarkdown).toContain("memory/people/telegram-111.md");
+		expect(context.sceneObservations).toContain("这是失败场景里的 observation");
+		expect(context.selectedMemoryMarkdowns).toEqual([]);
+		expect(store.getAuditEntries(agent.agentId).some((entry) => entry.kind === "persona.selector_failed")).toBe(true);
+	});
+
+	it("skips selector when the current message has no text content", async () => {
+		const completeMock = vi.fn(async () => ({
+			content: [{ type: "text" as const, text: "{\"paths\":[]}" }],
+		}));
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "selector-empty-message-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "111",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: GPU 租赁平台项目负责人。",
+				"---",
+				"",
+				"小王在做 GPU 租赁平台。",
+			].join("\n"),
+		);
+		const event: InboundMessageEvent = {
+			eventType: "message.created",
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m-empty",
+			sender: { externalId: "111", displayName: "小王" },
+			blocks: [],
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		};
+
+		const context = await personaMemory.buildPreparedContext(agent, session, event);
+
+		expect(context.selectedMemoryMarkdowns).toEqual([]);
 		expect(completeMock).not.toHaveBeenCalled();
 	});
 
@@ -484,6 +753,9 @@ describe("persona memory service", () => {
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-dm-111.md"), "utf-8")).toContain("description:");
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-dm-111.md"), "utf-8")).toContain("张三");
 		expect(formationPrompt).toContain("Memory files manifest:");
+		expect(formationPrompt).toContain("Finalize protocol (strict):");
+		expect(formationPrompt).toContain("If this run does not change any memory files, you must still call persona_finalize exactly once with consumeObservationLines=0.");
+		expect(formationPrompt).toContain("After calling persona_finalize, stop immediately and do not use any more tools.");
 		expect(() => readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-dm-111"), "utf-8")).toThrow();
 	});
 
@@ -686,7 +958,7 @@ describe("persona memory service", () => {
 			session,
 			event,
 			turnTranscript: "User:\n- Text: 测试共享队列\n\nBot:\n- Text: 好的",
-			personaContext: { indexMarkdown: "", sceneObservations: "" },
+			personaContext: { indexMarkdown: "", selectedMemoryMarkdowns: [], sceneObservations: "" },
 		});
 		personaMemory.queueDream(agent, { force: true });
 		await waitForBackgroundWork();
@@ -753,6 +1025,9 @@ describe("persona memory service", () => {
 		expect(readFileSync(join(store.getPersonaPeopleDir(agent.slug), "known.md"), "utf-8")).toContain("description:");
 		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toContain("这条 observation 应该继续保留");
 		expect(dreamPrompt).toContain("Memory files manifest:");
+		expect(dreamPrompt).toContain("Remove index.md references to memory files that do not exist anymore.");
+		expect(dreamPrompt).toContain("Merge duplicate index.md entries for the same person or scene into a single canonical entry.");
+		expect(dreamPrompt).toContain("For stale people files, the rewritten file should be meaningfully shorter than before.");
 		const audits = store.getAuditEntries(agent.agentId);
 		expect(audits.some((entry) => entry.kind === "persona.dream_started")).toBe(true);
 		expect(audits.some((entry) => entry.kind === "persona.dream_applied")).toBe(true);
@@ -942,6 +1217,13 @@ describe("persona memory service", () => {
 		expect(capturedPrompt).toContain("UNIQUE_INBOUND_TEXT_XYZ");
 		expect(capturedPrompt).toContain("bot reply here");
 		expect(capturedPrompt).toContain("second promise");
+		expect(capturedPrompt).toContain("Bot-visible commitments and obligations stated in this run transcript");
+		expect(capturedPrompt).toContain("Long-term defaults and standing preferences");
+		expect(capturedPrompt).toContain("User identity corrections and links");
+		expect(capturedPrompt).toContain("Update index.md summaries so the worker can notice that a detailed file is worth opening later.");
+		expect(capturedPrompt).toContain("Finalize protocol (strict):");
+		expect(capturedPrompt).toContain("If this run does not change any memory files, you must still call persona_finalize exactly once with consumeObservationLines=0.");
+		expect(capturedPrompt).toContain("De-prioritize or omit:");
 		expect(capturedPrompt).not.toContain("Ensure every people/scenes file you touch has YAML frontmatter");
 	});
 	});

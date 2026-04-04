@@ -36,9 +36,11 @@ import {
 } from "./judge.js";
 
 export type HarnessChannel = "telegram" | "napcat" | "both";
+export type HarnessScenarioCategory = "general" | "admin" | "reminder" | "recall" | "sedimentation" | "dream";
 
 export interface InternalChatHarnessRunOptions {
 	agentRef: string;
+	judgeAgentRef?: string;
 	channel?: HarnessChannel;
 	scenario?: string | string[];
 	keepSandbox?: boolean;
@@ -61,6 +63,7 @@ export interface InternalChatHarnessEvidence {
 export interface InternalChatHarnessScenarioResult {
 	name: string;
 	channel: Exclude<HarnessChannel, "both">;
+	category: HarnessScenarioCategory;
 	status: "passed" | "failed" | "skipped";
 	durationMs: number;
 	error?: string;
@@ -69,12 +72,42 @@ export interface InternalChatHarnessScenarioResult {
 	evidence: InternalChatHarnessEvidence;
 }
 
+export interface InternalChatHarnessCategorySummary {
+	total: number;
+	passed: number;
+	failed: number;
+	skipped: number;
+	passRate: number;
+}
+
+export interface InternalChatHarnessFailureSummary {
+	name: string;
+	channel: Exclude<HarnessChannel, "both">;
+	category: HarnessScenarioCategory;
+	reason: string;
+}
+
+export interface InternalChatHarnessSummary {
+	total: number;
+	passed: number;
+	failed: number;
+	skipped: number;
+	passRate: number;
+	byCategory: Partial<Record<HarnessScenarioCategory, InternalChatHarnessCategorySummary>>;
+	failures: InternalChatHarnessFailureSummary[];
+}
+
 export interface InternalChatHarnessReport {
 	ok: boolean;
 	agentRef: string;
 	agentSlug: string;
+	judgeAgentRef?: string;
+	judgeAgentSlug?: string;
+	subjectModelRef?: string;
+	judgeModelRef?: string;
 	startedAt: string;
 	finishedAt: string;
+	summary: InternalChatHarnessSummary;
 	results: InternalChatHarnessScenarioResult[];
 }
 
@@ -113,6 +146,7 @@ interface HarnessDriver {
 export interface CurrentEnvHarnessContext {
 	store: JsonNekoclawStore;
 	agent: AgentSpec;
+	judgeAgent?: AgentSpec;
 	outboundDispatch: OutboundDispatchService;
 	jobQueue: JobQueueService;
 	plugins: Map<string, ChannelPlugin>;
@@ -140,6 +174,7 @@ interface ScenarioContext extends CurrentEnvHarnessContext {
 interface ScenarioDefinition {
 	name: string;
 	channel: Exclude<HarnessChannel, "both">;
+	category: HarnessScenarioCategory;
 	run(context: ScenarioContext): Promise<HarnessReplyJudgeResult | HarnessArtifactJudgeResult | void>;
 }
 
@@ -190,6 +225,56 @@ function pickScenarioNames(option: string | string[] | undefined, definitions: S
 
 function tail<T>(values: T[], count = 20): T[] {
 	return values.slice(Math.max(0, values.length - count));
+}
+
+function computePassRate(input: { passed: number; failed: number }): number {
+	const total = input.passed + input.failed;
+	if (total === 0) {
+		return 1;
+	}
+	return input.passed / total;
+}
+
+function resolveHarnessFailureReason(result: InternalChatHarnessScenarioResult): string {
+	return result.judge?.reason?.trim() || result.error?.trim() || "Unknown failure";
+}
+
+export function buildHarnessSummary(results: InternalChatHarnessScenarioResult[]): InternalChatHarnessSummary {
+	const totals = {
+		total: results.length,
+		passed: results.filter((result) => result.status === "passed").length,
+		failed: results.filter((result) => result.status === "failed").length,
+		skipped: results.filter((result) => result.status === "skipped").length,
+	};
+	const categories = new Map<HarnessScenarioCategory, InternalChatHarnessCategorySummary>();
+	for (const result of results) {
+		const summary = categories.get(result.category) ?? {
+			total: 0,
+			passed: 0,
+			failed: 0,
+			skipped: 0,
+			passRate: 1,
+		};
+		summary.total += 1;
+		if (result.status === "passed") summary.passed += 1;
+		if (result.status === "failed") summary.failed += 1;
+		if (result.status === "skipped") summary.skipped += 1;
+		summary.passRate = computePassRate(summary);
+		categories.set(result.category, summary);
+	}
+	return {
+		...totals,
+		passRate: computePassRate(totals),
+		byCategory: Object.fromEntries(categories) as Partial<Record<HarnessScenarioCategory, InternalChatHarnessCategorySummary>>,
+		failures: results
+			.filter((result) => result.status === "failed")
+			.map((result) => ({
+				name: result.name,
+				channel: result.channel,
+				category: result.category,
+				reason: resolveHarnessFailureReason(result),
+			})),
+	};
 }
 
 function installFetchRegistry(): {
@@ -276,6 +361,22 @@ async function waitForQueueIdle(context: CurrentEnvHarnessContext): Promise<void
 		await sleep(50);
 	}
 	throw new Error(`Timed out waiting for queue idle after ${context.timeoutMs}ms`);
+}
+
+async function waitForAuditCount(
+	context: CurrentEnvHarnessContext,
+	kind: string,
+	minimumCount: number,
+): Promise<void> {
+	const deadline = Date.now() + context.timeoutMs;
+	while (Date.now() < deadline) {
+		const count = context.store.getAuditEntries(context.agent.agentId).filter((entry) => entry.kind === kind).length;
+		if (count >= minimumCount) {
+			return;
+		}
+		await sleep(50);
+	}
+	throw new Error(`Timed out waiting for audit kind "${kind}" to reach count ${minimumCount}`);
 }
 
 function getPendingPair(store: JsonNekoclawStore, agentId: string, channel: ChannelType, chatId: string): PairRequest | undefined {
@@ -394,7 +495,7 @@ async function judgeLatestOutbound(
 	const outbound = latestOutbound(context.driver, chatId);
 	const reply = outbound?.text?.trim();
 	assertCondition(reply, `Expected outbound message for chat ${chatId} before judging`);
-	return judgeHarnessReply(context.store, context.agent, {
+	return judgeHarnessReply(context.store, context.judgeAgent ?? context.agent, {
 		spec,
 		reply,
 		transcript: transcriptForChat(context.driver, chatId),
@@ -403,6 +504,17 @@ async function judgeLatestOutbound(
 
 function readPersonaRelativeFile(context: ScenarioContext, relativePath: string): string {
 	return readFileSync(join(context.store.getPersonaDir(context.agent.slug), relativePath), "utf-8");
+}
+
+function ensureScenarioPersonaLayout(context: ScenarioContext): void {
+	mkdirSync(context.store.getPersonaDir(context.agent.slug), { recursive: true });
+	mkdirSync(context.store.getPersonaPeopleDir(context.agent.slug), { recursive: true });
+	mkdirSync(context.store.getPersonaScenesDir(context.agent.slug), { recursive: true });
+	mkdirSync(context.store.getPersonaObservationsDir(context.agent.slug), { recursive: true });
+	const indexPath = context.store.getPersonaIndexPath(context.agent.slug);
+	if (!existsSync(indexPath)) {
+		writeFileSync(indexPath, "", "utf-8");
+	}
 }
 
 async function forceDreamAndWait(context: ScenarioContext): Promise<void> {
@@ -416,7 +528,7 @@ async function judgePersonaArtifacts(
 	spec: HarnessArtifactJudgeSpec,
 	sections: Array<{ label: string; content: string }>,
 ): Promise<HarnessArtifactJudgeResult> {
-	return judgeHarnessArtifacts(context.store, context.agent, {
+	return judgeHarnessArtifacts(context.store, context.judgeAgent ?? context.agent, {
 		spec,
 		evidence: sections.map((section) => `## ${section.label}\n${section.content}`).join("\n\n"),
 	});
@@ -1656,6 +1768,7 @@ async function scenarioPersonaMemoryDecay(context: ScenarioContext): Promise<Har
 		occurredAt: "2026-05-01T00:00:00.000Z",
 	});
 	await acceptPendingPair(context, context.dmUserId);
+	ensureScenarioPersonaLayout(context);
 	writeFileSync(
 		context.store.getPersonaIndexPath(context.agent.slug),
 		[
@@ -1700,7 +1813,130 @@ async function scenarioPersonaMemoryDecay(context: ScenarioContext): Promise<Har
 	});
 }
 
+async function scenarioPersonaDetailFileRecall(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "用户A",
+		text: "pair me",
+		occurredAt: "2026-05-03T00:00:00.000Z",
+	});
+	await acceptPendingPair(context, "111");
+	ensureScenarioPersonaLayout(context);
+	writeFileSync(
+		context.store.getPersonaIndexPath(context.agent.slug),
+		[
+			"## 我认识的人",
+			"- 用户A(tg:111)：长期在做 GPU 租赁平台，之前聊过数据库切换和支付链路 → memory/people/telegram-111.md",
+		].join("\n"),
+		"utf-8",
+	);
+	writeFileSync(
+		join(context.store.getPersonaPeopleDir(context.agent.slug), "telegram-111.md"),
+		[
+			"---",
+			"title: 用户A",
+			"description: 长期在做 GPU 租赁平台，后来把数据库从 MongoDB 换成了 Postgres。",
+			"---",
+			"",
+			"用户A 长期在做 GPU 租赁平台。",
+			"他后来说数据库还是从 MongoDB 换成了 Postgres，因为事务和对账链路更稳，不想再继续扛一致性问题。",
+			"最近仍在修支付链路和超时问题。",
+		].join("\n"),
+		"utf-8",
+	);
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "111",
+		senderId: "111",
+		senderName: "用户A",
+		text: "你还记得我后来把数据库换成什么了吗？顺便说一下当时为什么换。",
+		occurredAt: "2026-05-03T00:01:00.000Z",
+	});
+	return judgeLatestOutbound(context, "111", {
+		title: "场景 10：按需读取 detail file 召回细节",
+		expectations: [
+			"能明确回忆出数据库后来换成了 Postgres。",
+			"能提到切换原因与事务、一致性或对账链路稳定性有关，而不是只泛泛说“更合适”。",
+			"回答应体现读到了 detail file 里的具体信息，而不只是复述 index 的粗摘要。",
+		],
+		failureSignals: [
+			"只说记得你做 GPU 租赁平台，但答不出换成什么数据库。",
+			"把数据库名字说错，例如仍然说是 MongoDB。",
+			"原因含糊到看起来像没读 detail file。",
+		],
+	});
+}
+
+function parseNamedPlatform(text: string | undefined): string | undefined {
+	const normalized = text?.trim() || "";
+	if (/ubuntu\s*22\.?04/i.test(normalized)) {
+		return "Ubuntu 22.04";
+	}
+	if (/debian\s*12/i.test(normalized)) {
+		return "Debian 12";
+	}
+	return undefined;
+}
+
+async function scenarioPersonaRunTranscriptPersistence(context: ScenarioContext): Promise<void> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "222",
+		senderId: "222",
+		senderName: "用户B",
+		text: "pair me",
+		occurredAt: "2026-05-04T00:00:00.000Z",
+	});
+	const session = await acceptPendingPair(context, "222");
+	ensureScenarioPersonaLayout(context);
+	writeFileSync(
+		context.store.getPersonaObservationPath(context.agent.slug, "telegram-dm-222"),
+		Array.from({ length: 49 }, (_, index) => `[2026-05-03T23:${String(index).padStart(2, "0")}:00.000Z] telegram:222 用户B: 旧观察 ${index + 1}`).join("\n") + "\n",
+		"utf-8",
+	);
+	const baselineFormationCount = context.store
+		.getAuditEntries(context.agent.agentId)
+		.filter((entry) => entry.kind === "persona.formation_applied").length;
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "222",
+		senderId: "222",
+		senderName: "用户B",
+		text: "在 Ubuntu 22.04 和 Debian 12 里二选一，自己选一个，明确告诉我以后默认按哪个平台给我 shell 命令。不要解释理由。",
+		occurredAt: "2026-05-04T00:01:00.000Z",
+	});
+	const firstReply = latestOutbound(context.driver, "222")?.text?.trim();
+	const chosenPlatform = parseNamedPlatform(firstReply);
+	assertCondition(
+		chosenPlatform,
+		`Expected the first reply to clearly choose Ubuntu 22.04 or Debian 12, got "${firstReply ?? "(none)"}"`,
+	);
+
+	await waitForAuditCount(context, "persona.formation_applied", baselineFormationCount + 1);
+	context.store.resetSession(context.agent.agentId, session.sessionRecordId);
+
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: "222",
+		senderId: "222",
+		senderName: "用户B",
+		text: "你刚才自己选的默认平台是什么？",
+		occurredAt: "2026-05-04T00:02:00.000Z",
+	});
+	const secondReply = latestOutbound(context.driver, "222")?.text?.trim();
+	assertCondition(secondReply, "Expected a non-empty follow-up reply after resetting the session context");
+	assertCondition(
+		new RegExp(chosenPlatform.replace(".", "\\."), "i").test(secondReply),
+		`Expected the follow-up reply to preserve the earlier visible bot promise "${chosenPlatform}", got "${secondReply}"`,
+	);
+}
+
 async function scenarioDreamCrossSceneAssociation(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	ensureScenarioPersonaLayout(context);
 	writeFileSync(
 		context.store.getPersonaIndexPath(context.agent.slug),
 		[
@@ -1764,6 +2000,7 @@ async function scenarioDreamCrossSceneAssociation(context: ScenarioContext): Pro
 }
 
 async function scenarioDreamIndexRebuild(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	ensureScenarioPersonaLayout(context);
 	writeFileSync(
 		context.store.getPersonaIndexPath(context.agent.slug),
 		[
@@ -1810,6 +2047,7 @@ async function scenarioDreamIndexRebuild(context: ScenarioContext): Promise<Harn
 }
 
 async function scenarioDreamGlobalAging(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	ensureScenarioPersonaLayout(context);
 	const laoLiPath = join(context.store.getPersonaPeopleDir(context.agent.slug), "lao-li.md");
 	const xiaoWangPath = join(context.store.getPersonaPeopleDir(context.agent.slug), "xiao-wang.md");
 	const laoLiBefore = [
@@ -1875,6 +2113,7 @@ async function scenarioDreamGlobalAging(context: ScenarioContext): Promise<Harne
 }
 
 async function scenarioDreamFindsMissingPerson(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	ensureScenarioPersonaLayout(context);
 	writeFileSync(
 		context.store.getPersonaIndexPath(context.agent.slug),
 		[
@@ -1930,6 +2169,7 @@ async function scenarioDreamFindsMissingPerson(context: ScenarioContext): Promis
 }
 
 async function scenarioDreamPreservesIdentity(context: ScenarioContext): Promise<HarnessArtifactJudgeResult> {
+	ensureScenarioPersonaLayout(context);
 	writeFileSync(
 		context.store.getPersonaIndexPath(context.agent.slug),
 		[
@@ -2029,66 +2269,68 @@ async function scenarioDreamPreservesIdentity(context: ScenarioContext): Promise
 }
 
 const SCENARIOS: ScenarioDefinition[] = [
-	{ name: "dm_pair_prompt", channel: "telegram", run: scenarioDmPairPrompt },
-	{ name: "dm_pair_accept_and_chat", channel: "telegram", run: scenarioDmPairAcceptAndChat },
-	{ name: "dm_context_continuity", channel: "telegram", run: scenarioDmContextContinuity },
-	{ name: "dm_image_vision", channel: "telegram", run: scenarioDmImageVision },
-	{ name: "dm_multi_image_vision", channel: "telegram", run: scenarioDmMultiImageVision },
-	{ name: "dm_natural_image_description", channel: "telegram", run: scenarioDmNaturalImageDescription },
-	{ name: "dm_natural_image_restate_cn", channel: "telegram", run: scenarioDmNaturalImageRestateChinese },
-	{ name: "dm_file_attachment", channel: "telegram", run: scenarioDmFileAttachment },
-	{ name: "dm_multi_file_attachment", channel: "telegram", run: scenarioDmMultiFileAttachment },
-	{ name: "dm_image_text_mixed", channel: "telegram", run: scenarioDmImageTextMixed },
-	{ name: "group_mention_ignored", channel: "telegram", run: scenarioGroupMentionIgnored },
-	{ name: "group_mention_chat", channel: "telegram", run: scenarioGroupMentionChat },
-	{ name: "group_reply_chat", channel: "telegram", run: scenarioGroupReplyChat },
-	{ name: "group_reply_ignored_not_bot", channel: "telegram", run: scenarioGroupReplyIgnoredWhenNotBot },
-	{ name: "group_pair_command", channel: "telegram", run: scenarioGroupPairCommand },
-	{ name: "tool_proactive_send_message", channel: "telegram", run: scenarioToolProactiveSendMessage },
-	{ name: "admin_status", channel: "telegram", run: scenarioAdminStatus },
-	{ name: "admin_trigger_toggle", channel: "telegram", run: scenarioAdminTriggerToggle },
-	{ name: "admin_reset", channel: "telegram", run: scenarioAdminReset },
-	{ name: "admin_model_session_override", channel: "telegram", run: scenarioAdminModelSessionOverride },
-	{ name: "persona_group_observation_recall", channel: "telegram", run: scenarioPersonaGroupObservationRecall },
-	{ name: "persona_cross_session_memory", channel: "telegram", run: scenarioPersonaCrossSessionMemory },
-	{ name: "persona_emotional_context_memory", channel: "telegram", run: scenarioPersonaEmotionalContextMemory },
-	{ name: "persona_correction", channel: "telegram", run: scenarioPersonaCorrection },
-	{ name: "persona_experience_recall", channel: "telegram", run: scenarioPersonaExperienceRecall },
-	{ name: "persona_uncertainty", channel: "telegram", run: scenarioPersonaUncertainty },
-	{ name: "persona_multi_group_experience", channel: "telegram", run: scenarioPersonaMultiGroupExperience },
-	{ name: "persona_memory_decay", channel: "telegram", run: scenarioPersonaMemoryDecay },
-	{ name: "persona_dream_cross_scene_association", channel: "telegram", run: scenarioDreamCrossSceneAssociation },
-	{ name: "persona_dream_index_rebuild", channel: "telegram", run: scenarioDreamIndexRebuild },
-	{ name: "persona_dream_global_aging", channel: "telegram", run: scenarioDreamGlobalAging },
-	{ name: "persona_dream_find_missing_person", channel: "telegram", run: scenarioDreamFindsMissingPerson },
-	{ name: "persona_dream_preserves_identity", channel: "telegram", run: scenarioDreamPreservesIdentity },
-	{ name: "scheduled_session_reminder_dm", channel: "telegram", run: scenarioScheduledSessionReminderDm },
-	{ name: "scheduled_session_reminder_group", channel: "telegram", run: scenarioScheduledSessionReminderGroup },
-	{ name: "scheduled_reminder_reset_invalidates", channel: "telegram", run: scenarioScheduledReminderResetInvalidates },
-	{ name: "dm_pair_prompt", channel: "napcat", run: scenarioDmPairPrompt },
-	{ name: "dm_pair_accept_and_chat", channel: "napcat", run: scenarioDmPairAcceptAndChat },
-	{ name: "dm_context_continuity", channel: "napcat", run: scenarioDmContextContinuity },
-	{ name: "dm_image_vision", channel: "napcat", run: scenarioDmImageVision },
-	{ name: "dm_multi_image_vision", channel: "napcat", run: scenarioDmMultiImageVision },
-	{ name: "dm_natural_image_description", channel: "napcat", run: scenarioDmNaturalImageDescription },
-	{ name: "dm_natural_image_restate_cn", channel: "napcat", run: scenarioDmNaturalImageRestateChinese },
-	{ name: "dm_file_attachment", channel: "napcat", run: scenarioDmFileAttachment },
-	{ name: "dm_multi_file_attachment", channel: "napcat", run: scenarioDmMultiFileAttachment },
-	{ name: "dm_image_text_mixed", channel: "napcat", run: scenarioDmImageTextMixed },
-	{ name: "group_mention_ignored", channel: "napcat", run: scenarioGroupMentionIgnored },
-	{ name: "group_mention_chat", channel: "napcat", run: scenarioGroupMentionChat },
-	{ name: "group_reply_chat", channel: "napcat", run: scenarioGroupReplyChat },
-	{ name: "group_reply_ignored_not_bot", channel: "napcat", run: scenarioGroupReplyIgnoredWhenNotBot },
-	{ name: "group_pair_command", channel: "napcat", run: scenarioGroupPairCommand },
-	{ name: "tool_proactive_send_message", channel: "napcat", run: scenarioToolProactiveSendMessage },
-	{ name: "admin_status", channel: "napcat", run: scenarioAdminStatus },
-	{ name: "admin_trigger_toggle", channel: "napcat", run: scenarioAdminTriggerToggle },
-	{ name: "admin_reset", channel: "napcat", run: scenarioAdminReset },
-	{ name: "admin_model_session_override", channel: "napcat", run: scenarioAdminModelSessionOverride },
-	{ name: "persona_cross_platform_identity", channel: "napcat", run: scenarioPersonaCrossPlatformIdentity },
-	{ name: "scheduled_session_reminder_dm", channel: "napcat", run: scenarioScheduledSessionReminderDm },
-	{ name: "scheduled_session_reminder_group", channel: "napcat", run: scenarioScheduledSessionReminderGroup },
-	{ name: "scheduled_reminder_reset_invalidates", channel: "napcat", run: scenarioScheduledReminderResetInvalidates },
+	{ name: "dm_pair_prompt", channel: "telegram", category: "general", run: scenarioDmPairPrompt },
+	{ name: "dm_pair_accept_and_chat", channel: "telegram", category: "general", run: scenarioDmPairAcceptAndChat },
+	{ name: "dm_context_continuity", channel: "telegram", category: "general", run: scenarioDmContextContinuity },
+	{ name: "dm_image_vision", channel: "telegram", category: "general", run: scenarioDmImageVision },
+	{ name: "dm_multi_image_vision", channel: "telegram", category: "general", run: scenarioDmMultiImageVision },
+	{ name: "dm_natural_image_description", channel: "telegram", category: "general", run: scenarioDmNaturalImageDescription },
+	{ name: "dm_natural_image_restate_cn", channel: "telegram", category: "general", run: scenarioDmNaturalImageRestateChinese },
+	{ name: "dm_file_attachment", channel: "telegram", category: "general", run: scenarioDmFileAttachment },
+	{ name: "dm_multi_file_attachment", channel: "telegram", category: "general", run: scenarioDmMultiFileAttachment },
+	{ name: "dm_image_text_mixed", channel: "telegram", category: "general", run: scenarioDmImageTextMixed },
+	{ name: "group_mention_ignored", channel: "telegram", category: "general", run: scenarioGroupMentionIgnored },
+	{ name: "group_mention_chat", channel: "telegram", category: "general", run: scenarioGroupMentionChat },
+	{ name: "group_reply_chat", channel: "telegram", category: "general", run: scenarioGroupReplyChat },
+	{ name: "group_reply_ignored_not_bot", channel: "telegram", category: "general", run: scenarioGroupReplyIgnoredWhenNotBot },
+	{ name: "group_pair_command", channel: "telegram", category: "general", run: scenarioGroupPairCommand },
+	{ name: "tool_proactive_send_message", channel: "telegram", category: "general", run: scenarioToolProactiveSendMessage },
+	{ name: "admin_status", channel: "telegram", category: "admin", run: scenarioAdminStatus },
+	{ name: "admin_trigger_toggle", channel: "telegram", category: "admin", run: scenarioAdminTriggerToggle },
+	{ name: "admin_reset", channel: "telegram", category: "admin", run: scenarioAdminReset },
+	{ name: "admin_model_session_override", channel: "telegram", category: "admin", run: scenarioAdminModelSessionOverride },
+	{ name: "persona_group_observation_recall", channel: "telegram", category: "recall", run: scenarioPersonaGroupObservationRecall },
+	{ name: "persona_cross_session_memory", channel: "telegram", category: "recall", run: scenarioPersonaCrossSessionMemory },
+	{ name: "persona_emotional_context_memory", channel: "telegram", category: "recall", run: scenarioPersonaEmotionalContextMemory },
+	{ name: "persona_correction", channel: "telegram", category: "recall", run: scenarioPersonaCorrection },
+	{ name: "persona_experience_recall", channel: "telegram", category: "recall", run: scenarioPersonaExperienceRecall },
+	{ name: "persona_uncertainty", channel: "telegram", category: "recall", run: scenarioPersonaUncertainty },
+	{ name: "persona_multi_group_experience", channel: "telegram", category: "recall", run: scenarioPersonaMultiGroupExperience },
+	{ name: "persona_memory_decay", channel: "telegram", category: "recall", run: scenarioPersonaMemoryDecay },
+	{ name: "persona_detail_file_recall", channel: "telegram", category: "recall", run: scenarioPersonaDetailFileRecall },
+	{ name: "persona_run_transcript_persistence", channel: "telegram", category: "sedimentation", run: scenarioPersonaRunTranscriptPersistence },
+	{ name: "persona_dream_cross_scene_association", channel: "telegram", category: "dream", run: scenarioDreamCrossSceneAssociation },
+	{ name: "persona_dream_index_rebuild", channel: "telegram", category: "dream", run: scenarioDreamIndexRebuild },
+	{ name: "persona_dream_global_aging", channel: "telegram", category: "dream", run: scenarioDreamGlobalAging },
+	{ name: "persona_dream_find_missing_person", channel: "telegram", category: "dream", run: scenarioDreamFindsMissingPerson },
+	{ name: "persona_dream_preserves_identity", channel: "telegram", category: "dream", run: scenarioDreamPreservesIdentity },
+	{ name: "scheduled_session_reminder_dm", channel: "telegram", category: "reminder", run: scenarioScheduledSessionReminderDm },
+	{ name: "scheduled_session_reminder_group", channel: "telegram", category: "reminder", run: scenarioScheduledSessionReminderGroup },
+	{ name: "scheduled_reminder_reset_invalidates", channel: "telegram", category: "reminder", run: scenarioScheduledReminderResetInvalidates },
+	{ name: "dm_pair_prompt", channel: "napcat", category: "general", run: scenarioDmPairPrompt },
+	{ name: "dm_pair_accept_and_chat", channel: "napcat", category: "general", run: scenarioDmPairAcceptAndChat },
+	{ name: "dm_context_continuity", channel: "napcat", category: "general", run: scenarioDmContextContinuity },
+	{ name: "dm_image_vision", channel: "napcat", category: "general", run: scenarioDmImageVision },
+	{ name: "dm_multi_image_vision", channel: "napcat", category: "general", run: scenarioDmMultiImageVision },
+	{ name: "dm_natural_image_description", channel: "napcat", category: "general", run: scenarioDmNaturalImageDescription },
+	{ name: "dm_natural_image_restate_cn", channel: "napcat", category: "general", run: scenarioDmNaturalImageRestateChinese },
+	{ name: "dm_file_attachment", channel: "napcat", category: "general", run: scenarioDmFileAttachment },
+	{ name: "dm_multi_file_attachment", channel: "napcat", category: "general", run: scenarioDmMultiFileAttachment },
+	{ name: "dm_image_text_mixed", channel: "napcat", category: "general", run: scenarioDmImageTextMixed },
+	{ name: "group_mention_ignored", channel: "napcat", category: "general", run: scenarioGroupMentionIgnored },
+	{ name: "group_mention_chat", channel: "napcat", category: "general", run: scenarioGroupMentionChat },
+	{ name: "group_reply_chat", channel: "napcat", category: "general", run: scenarioGroupReplyChat },
+	{ name: "group_reply_ignored_not_bot", channel: "napcat", category: "general", run: scenarioGroupReplyIgnoredWhenNotBot },
+	{ name: "group_pair_command", channel: "napcat", category: "general", run: scenarioGroupPairCommand },
+	{ name: "tool_proactive_send_message", channel: "napcat", category: "general", run: scenarioToolProactiveSendMessage },
+	{ name: "admin_status", channel: "napcat", category: "admin", run: scenarioAdminStatus },
+	{ name: "admin_trigger_toggle", channel: "napcat", category: "admin", run: scenarioAdminTriggerToggle },
+	{ name: "admin_reset", channel: "napcat", category: "admin", run: scenarioAdminReset },
+	{ name: "admin_model_session_override", channel: "napcat", category: "admin", run: scenarioAdminModelSessionOverride },
+	{ name: "persona_cross_platform_identity", channel: "napcat", category: "recall", run: scenarioPersonaCrossPlatformIdentity },
+	{ name: "scheduled_session_reminder_dm", channel: "napcat", category: "reminder", run: scenarioScheduledSessionReminderDm },
+	{ name: "scheduled_session_reminder_group", channel: "napcat", category: "reminder", run: scenarioScheduledSessionReminderGroup },
+	{ name: "scheduled_reminder_reset_invalidates", channel: "napcat", category: "reminder", run: scenarioScheduledReminderResetInvalidates },
 ];
 
 class TelegramHarnessDriver implements HarnessDriver {
@@ -2439,6 +2681,12 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 	const store = new JsonNekoclawStore();
 	const source = store.getAgentByRef(options.agentRef);
 	const agent = cloneAgentConfig(store, source);
+	const judgeAgent =
+		options.judgeAgentRef && options.judgeAgentRef !== options.agentRef
+			? cloneAgentConfig(store, store.getAgentByRef(options.judgeAgentRef))
+			: options.judgeAgentRef
+				? agent
+				: undefined;
 	const fetchRegistry = installFetchRegistry();
 	const plugins = new Map<string, ChannelPlugin>();
 	const outboundDispatch = new OutboundDispatchService(store, plugins);
@@ -2523,6 +2771,7 @@ async function createHarnessContext(options: InternalChatHarnessRunOptions): Pro
 	return {
 		store,
 		agent,
+		judgeAgent,
 		outboundDispatch,
 		jobQueue,
 		plugins,
@@ -2587,6 +2836,7 @@ export async function runChatHarnessInCurrentEnvironment(
 				results.push({
 					name: scenario.name,
 					channel: scenario.channel,
+					category: scenario.category,
 					status: "skipped",
 					durationMs: Date.now() - start,
 					evidence: {
@@ -2645,6 +2895,7 @@ export async function runChatHarnessInCurrentEnvironment(
 				results.push({
 					name: scenario.name,
 					channel: scenario.channel,
+					category: scenario.category,
 					status: "passed",
 					durationMs: Date.now() - start,
 					outboundPreview: outbound?.text,
@@ -2655,6 +2906,7 @@ export async function runChatHarnessInCurrentEnvironment(
 				results.push({
 					name: scenario.name,
 					channel: scenario.channel,
+					category: scenario.category,
 					status: "failed",
 					durationMs: Date.now() - start,
 					error: error instanceof Error ? error.message : String(error),
@@ -2673,8 +2925,18 @@ export async function runChatHarnessInCurrentEnvironment(
 		ok: results.every((result) => result.status !== "failed"),
 		agentRef: options.agentRef,
 		agentSlug: context.agent.slug,
+		judgeAgentRef: options.judgeAgentRef,
+		judgeAgentSlug: context.judgeAgent?.slug,
+		subjectModelRef: context.agent.provider && context.agent.modelId ? knownModelRef(context.store, context.agent) : undefined,
+		judgeModelRef:
+			context.judgeAgent?.provider && context.judgeAgent.modelId
+				? knownModelRef(context.store, context.judgeAgent)
+				: context.agent.provider && context.agent.modelId
+					? knownModelRef(context.store, context.agent)
+					: undefined,
 		startedAt,
 		finishedAt: nowIso(),
+		summary: buildHarnessSummary(results),
 		results,
 	};
 }

@@ -12,6 +12,8 @@ export const PERSONA_HARNESS_SCENARIOS = [
 	"persona_uncertainty",
 	"persona_multi_group_experience",
 	"persona_memory_decay",
+	"persona_detail_file_recall",
+	"persona_run_transcript_persistence",
 	"persona_dream_cross_scene_association",
 	"persona_dream_index_rebuild",
 	"persona_dream_global_aging",
@@ -28,4 +30,10 @@ export async function runPersonaHarness(
 		scenario: [...PERSONA_HARNESS_SCENARIOS],
 		judgeReplies: true,
 	});
+}
+
+export async function runPersonaBenchmark(
+	options: Omit<InternalChatHarnessRunOptions, "scenario" | "channel"> & { channel?: "both" | "telegram" | "napcat" },
+): Promise<InternalChatHarnessReport & { sandboxPath?: string }> {
+	return runPersonaHarness(options);
 }

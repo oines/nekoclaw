@@ -50,7 +50,16 @@ export interface QueueEvent {
 
 export interface PreparedPersonaContext {
 	indexMarkdown: string;
+	selectedMemoryMarkdowns: PreparedPersonaMemoryEntry[];
 	sceneObservations: string;
+}
+
+export interface PreparedPersonaMemoryEntry {
+	path: string;
+	kind: "people" | "scene";
+	title: string;
+	description: string;
+	markdown: string;
 }
 
 export interface RuntimeDirectoryContactSnapshot {

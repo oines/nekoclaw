@@ -200,6 +200,9 @@ export async function executeMaintenanceSession(input: {
 			"Never modify observations/ or control/. Observations are evidence only.",
 			"Do not invent facts. Preserve uncertainty and preserve whether you only observed something or participated in it.",
 			"Before you finish, you must call persona_finalize exactly once.",
+			"Call persona_finalize only after every edit is complete.",
+			"If no files need to change, still call persona_finalize exactly once.",
+			"After calling persona_finalize, stop immediately and do not use any more tools.",
 		].join("\n"),
 		agentsFilesOverride: () => ({ agentsFiles: [] }),
 	});

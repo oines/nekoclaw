@@ -196,7 +196,7 @@ describe("message router", () => {
 		});
 	});
 
-	it("ignores paired group messages when the channel trigger does not match", async () => {
+	it("records paired group messages in observations even when the channel trigger does not match", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");
 		const { MessageRouterService } = await import("../src/runtime/message-router.js");
@@ -271,17 +271,11 @@ describe("message router", () => {
 
 		expect(enqueue).not.toHaveBeenCalled();
 		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "quiet-group-cat", ".nekoclaw-persona", "observations");
-		const files = (() => {
-			try {
-				return readdirSync(obsDir);
-			} catch {
-				return [];
-			}
-		})();
-		expect(files).toHaveLength(0);
+		const files = readdirSync(obsDir).filter((name) => name.endsWith(".log"));
+		expect(files).toEqual(["telegram-group-1002.log"]);
 	});
 
-	it("ignores group slash commands before command routing when mention triggering does not match", async () => {
+	it("does not record paired group slash commands in observations before trigger filtering", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");
 		const { MessageRouterService } = await import("../src/runtime/message-router.js");
@@ -360,12 +354,12 @@ describe("message router", () => {
 		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "quiet-command-cat", ".nekoclaw-persona", "observations");
 		const files = (() => {
 			try {
-				return readdirSync(obsDir);
+				return readdirSync(obsDir).filter((name) => name.endsWith(".log"));
 			} catch {
 				return [];
 			}
 		})();
-		expect(files).toHaveLength(0);
+		expect(files).toEqual([]);
 	});
 
 	it("does not write an observation for an unpaired message", async () => {
@@ -424,7 +418,7 @@ describe("message router", () => {
 		expect(files).toHaveLength(0);
 	});
 
-	it("does not write an observation for a command message", async () => {
+	it("does not write an observation for a paired command message before command routing", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { CommandRouterService } = await import("../src/runtime/command-router.js");
 		const { MessageRouterService } = await import("../src/runtime/message-router.js");
@@ -480,8 +474,14 @@ describe("message router", () => {
 		expect(reply).toHaveBeenCalledTimes(1);
 		expect(enqueue).not.toHaveBeenCalled();
 		const obsDir = join(tempHome, ".nekoclaw", "workspaces", "command-obs-cat", ".nekoclaw-persona", "observations");
-		const files = (() => { try { return readdirSync(obsDir); } catch { return []; } })();
-		expect(files).toHaveLength(0);
+		const files = (() => {
+			try {
+				return readdirSync(obsDir).filter((f) => f.endsWith(".log"));
+			} catch {
+				return [];
+			}
+		})();
+		expect(files).toEqual([]);
 	});
 
 	it("writes an observation for a normal paired message", async () => {

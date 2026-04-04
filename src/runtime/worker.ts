@@ -87,6 +87,20 @@ export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: 
 					? `## Persona Index
 ${payload.personaContext.indexMarkdown}`
 					: "",
+				payload.personaContext.selectedMemoryMarkdowns.length > 0
+					? `## Selected Persona Memories
+${payload.personaContext.selectedMemoryMarkdowns
+	.map(
+		(entry) =>
+			`### ${entry.path}
+- Kind: ${entry.kind}
+- Title: ${entry.title || "(untitled)"}
+- Description: ${entry.description || "(no description)"}
+
+${entry.markdown}`,
+	)
+	.join("\n\n")}`
+					: "",
 				payload.personaContext.sceneObservations
 					? `## Current Scene Observations
 ${payload.personaContext.sceneObservations}`
@@ -124,12 +138,25 @@ ${payload.personaContext.sceneObservations}`
 - \`SOUL.md\` is the primary source for your style, voice, and personality.
 - Runtime rules constrain behavior and tool usage; they do not replace your voice.
 - If Persona memory context is present, treat it as the authoritative memory substrate for people and past events.
-- The persona index is your default memory context.
-- Read detailed persona memory files only when the current dialogue genuinely needs detail that is not already clear from index.md and the current conversation.
-- If you need detailed memory about a person or scene, use the built-in \`read\` tool to open the specific file path referenced in index.md under \`.nekoclaw-persona/memory/\`.
+- The persona index is your routing map and default memory context: check \`index.md\` first, then read the 1-3 most relevant detailed files it points to when the answer depends on specifics.
+- If the user asks about prior conversations, memory, identity, promises, defaults, people, scenes, or "what happened before", treat that as a strong cue to inspect persona memory instead of answering from vague impression.
+- Strong recall triggers include phrases like "还记得", "上次", "之前", "后来", "我是谁", "那个人", "那个群", "默认按哪个", "你答应过什么", and similar callbacks to earlier context.
+- If a relevant detail file exists and could verify the answer, use the built-in \`read\` tool to open the specific path referenced in \`index.md\` under \`.nekoclaw-persona/memory/\` before answering.
+- Do not guess or rely on index-level summaries alone when the user is asking for detail that a referenced memory file can confirm.
+- When useful, combine 1 person file plus 1 scene file so you can answer both who someone is and where/when that information came up.
 - Current Scene Observations are recent passive observations (旁观记录). If you refer to them, make it explicit when you were only observing rather than participating.
 - Current Scene Observations are already injected for you, so you do not need to manually read observations/ files.
+- If Current Scene Observations already contain the answer, summarize those observed facts directly instead of stalling, deflecting, or asking the user to repeat them.
+- Do not invent facts beyond what Persona memories or Current Scene Observations support. If evidence is partial, answer the supported part and mark the rest as uncertain.
+- Never turn passive observations into "we discussed" or other participation claims. Keep source distinctions explicit.
+- For recall questions like "群里刚才在聊什么", "还记得", "上次", or "最近忙的那些事", answer the facts first. Do not lead with cute filler, roleplay deflection, or a request for the user to remind you when evidence is already present.
+- Preserve source distinctions: say whether something came from your own participation, passive observation, or a memory file you just checked.
 - Preserve uncertainty markers from the evidence ("可能", "应该", etc.) instead of upgrading them into certainty.
+- Examples:
+- The user asks "上次数据库选型那个事你还记得吗" -> check \`index.md\`, then read the referenced person/scene file before answering.
+- The user asks "你之前答应过我默认用哪个方案" -> read the relevant memory file; do not answer from vibe or only the index summary.
+- The user asks "那个群里后来怎么说的" -> prefer the scene file, and make clear whether you personally participated or only observed.
+- The user asks "我是谁" or corrects identity -> verify the linked person file and preserve uncertainty if identity is still not fully confirmed.
 ${hasCurrentImages
 	? `- The current inbound message includes image content. Answer with direct visual facts first.
 - Do NOT use placeholder templates, bracketed fill-ins, canned admiration, or speculative scene descriptions.

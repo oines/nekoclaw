@@ -10,6 +10,7 @@ import { CommandRouterService } from "./command-router.js";
 import { isRuntimeBackpressureError } from "./errors.js";
 import { PersonaMemoryService } from "./persona-memory.js";
 import { getRuntimeKey } from "./runtime-key.js";
+import { parseAddressedSlashCommand } from "../command-parsing.js";
 
 function shouldSuppressReprompt(pair: PairRequest, cooldownSeconds: number): boolean {
 	if (!pair.lastPromptedAt) {
@@ -57,6 +58,7 @@ export class MessageRouterService {
 						attachmentsRelativeDir: `chats/${session.sessionRecordId}/attachments`,
 					})
 				: event;
+		const parsedCommand = parseAddressedSlashCommand(hydratedEvent);
 		const canProcessNormally = plugin?.triggering.shouldProcessEvent(hydratedEvent) ?? true;
 		if (session) {
 			if (hydratedEvent.chatKind === "group" && hydratedEvent.chatTitle?.trim()) {
@@ -79,6 +81,9 @@ export class MessageRouterService {
 				messageId: hydratedEvent.messageId,
 				eventType: hydratedEvent.eventType,
 			});
+			if (!parsedCommand) {
+				this.personaMemory.recordInbound(agent.agentId, session, hydratedEvent);
+			}
 		}
 		if (plugin && canProcessNormally && (await this.commands.handleCommand(agent, plugin, hydratedEvent, session))) {
 			return;
@@ -95,7 +100,6 @@ export class MessageRouterService {
 			await this.handleUnpairedMessage(agent.agentId, channel.type, hydratedEvent, sessionAddress);
 			return;
 		}
-		this.personaMemory.recordInbound(agent.agentId, session, hydratedEvent);
 		try {
 			await this.enqueue({
 				jobId: crypto.randomUUID(),

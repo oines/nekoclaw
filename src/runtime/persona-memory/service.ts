@@ -14,9 +14,12 @@ import { buildDreamPrompt, buildDreamSkipKey } from "./dream.js";
 import { buildFormationBacklogPrompt, buildFormationTurnPrompt } from "./formation.js";
 import { buildDreamCorpusSnapshot } from "./manifest.js";
 import { createMaintenanceClone, destroyMaintenanceClone, executeMaintenanceSession, syncMaintenanceClone } from "./maintenance-agent.js";
-import { buildObservationSignature, buildSceneMemoryPath, buildSceneRef, formatObservationLine, shouldRunFormationForObservations, takeTailLinesWithinBudget, trimToTokenBudget } from "./observations.js";
+import { buildObservationSignature, buildSceneMemoryPath, buildSceneRef, collectEventText, formatObservationLine, shouldRunFormationForObservations, takeTailLinesWithinBudget, trimToTokenBudget } from "./observations.js";
 import { PersonaPaths } from "./paths.js";
+import { selectRelevantPersonaMemories } from "./selector.js";
 import type { DreamState, FormationRetryState, PersonaMemoryRuntimeState } from "./types.js";
+
+const SELECTED_MEMORY_TOKEN_BUDGET = 800;
 
 export class PersonaMemoryService {
 	private readonly storePaths = new StorePaths();
@@ -46,13 +49,16 @@ export class PersonaMemoryService {
 		agent: AgentSpec,
 		session: SessionRecord,
 		event: InboundMessageEvent,
+		effectiveModel?: WorkerPayload["effectiveModel"],
 	): Promise<PreparedPersonaContext> {
 		const paths = this.ensurePersonaLayout(agent.slug);
 		const sceneRef = buildSceneRef(session, event);
 		const indexMarkdown = trimToTokenBudget(readTextFile(paths.indexPath, ""), INDEX_TOKEN_BUDGET);
 		const sceneObservations = this.readSceneObservations(paths, sceneRef);
+		const selectedMemoryMarkdowns = await this.selectMemoryFiles(agent, paths, event, effectiveModel);
 		return {
 			indexMarkdown,
+			selectedMemoryMarkdowns,
 			sceneObservations,
 		};
 	}
@@ -155,6 +161,73 @@ export class PersonaMemoryService {
 
 	private readSceneObservations(paths: PersonaPaths, sceneRef: string): string {
 		return takeTailLinesWithinBudget(readTextFile(paths.observationPath(sceneRef), ""));
+	}
+
+	private async selectMemoryFiles(
+		agent: AgentSpec,
+		paths: PersonaPaths,
+		event: InboundMessageEvent,
+		effectiveModel: WorkerPayload["effectiveModel"] | undefined,
+	): Promise<PreparedPersonaContext["selectedMemoryMarkdowns"]> {
+		const manifest = this.scanPersonaMemoryManifest(agent.slug);
+		if (manifest.length === 0) {
+			return [];
+		}
+		const messageText = this.buildSelectorMessageText(event);
+		if (!messageText) {
+			return [];
+		}
+		const modelConfig = this.resolveModel(agent, effectiveModel);
+		if (!modelConfig) {
+			return [];
+		}
+		try {
+			const result = await selectRelevantPersonaMemories(
+				modelConfig.model,
+				{
+					senderAccount: this.buildSelectorSenderAccount(event),
+					senderDisplayName: event.sender.displayName,
+					messageText,
+					manifest,
+				},
+				{ apiKey: modelConfig.apiKey },
+			);
+			const manifestByPath = new Map(manifest.map((entry) => [entry.path, entry] as const));
+			const selected = result.paths
+				.map((path) => {
+					const entry = manifestByPath.get(path);
+					if (!entry) {
+						return undefined;
+					}
+					return {
+						path: entry.path,
+						kind: entry.kind,
+						title: entry.title,
+						description: entry.description,
+						markdown: trimToTokenBudget(readTextFile(join(paths.personaDir, entry.path), ""), SELECTED_MEMORY_TOKEN_BUDGET),
+					};
+				})
+				.filter((entry): entry is PreparedPersonaContext["selectedMemoryMarkdowns"][number] => Boolean(entry && entry.markdown.trim()));
+			this.store.audit(agent.agentId, "persona.selector_applied", {
+				selectedPaths: selected.map((entry) => entry.path),
+				selectedCount: selected.length,
+				manifestCount: manifest.length,
+			});
+			return selected;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (message.includes("selector timeout")) {
+				this.store.audit(agent.agentId, "persona.selector_timeout", {
+					manifestCount: manifest.length,
+				});
+			} else {
+				this.store.audit(agent.agentId, "persona.selector_failed", {
+					error: message,
+					manifestCount: manifest.length,
+				});
+			}
+			return [];
+		}
 	}
 
 	private scanPersonaMemoryManifest(slug: string) {
@@ -445,6 +518,17 @@ export class PersonaMemoryService {
 			.split(/\r?\n/)
 			.map((line) => line.trimEnd())
 			.filter((line) => line.length > 0);
+	}
+
+	private buildSelectorSenderAccount(event: InboundMessageEvent): string {
+		const channel = event.channelType === "napcat" ? "qq" : event.channelType;
+		return `${channel}:${event.sender.externalId || event.chatId}`;
+	}
+
+	private buildSelectorMessageText(event: InboundMessageEvent): string {
+		return collectEventText(event)
+			.replace(/^- [A-Za-z]+:\s*/gm, "")
+			.trim();
 	}
 
 	private resolveModel(
