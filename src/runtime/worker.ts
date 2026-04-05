@@ -12,7 +12,7 @@ import {
 import type { AfterToolCallContext, AfterToolCallResult } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, UserMessage } from "@mariozechner/pi-ai";
 import type { Api, Model } from "@mariozechner/pi-ai";
-import { summarizeBlocks } from "../messages.js";
+import { summarizeInboundEvent } from "../messages.js";
 import type { RuntimeModelsConfig } from "../model/model-types.js";
 import { resolveRuntimeModelInput } from "../model/runtime-model-metadata.js";
 import { SESSION_COMPACTION_SETTINGS, shapeSessionMessagesForPrompt } from "./session-hygiene.js";
@@ -374,7 +374,7 @@ function buildPrompt(payload: WorkerPayload, hasImages: boolean, hasFiles: boole
 		sender ? `Sender: ${sender}` : undefined,
 		payload.job.event.replyToMessageId ? `Replying to message: ${payload.job.event.replyToMessageId}` : undefined,
 		"Content:",
-		...summarizeBlocks(payload.job.event.blocks),
+		...summarizeInboundEvent(payload.job.event),
 	];
 	if (hasImages) {
 		lines.push(

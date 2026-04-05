@@ -1,5 +1,5 @@
 import { parseAddressedSlashCommand } from "../command-parsing.js";
-import { summarizeBlocks } from "../messages.js";
+import { summarizeInboundEvent } from "../messages.js";
 import type { CountTextTokens } from "./persona-memory/observations.js";
 import type { ChatKind, ChannelType, InboundMessageEvent, ReplyPayload, SessionRecord } from "../types.js";
 import { FORMATION_TIMELINE_MAX_EVENTS, FORMATION_TIMELINE_TOKEN_BUDGET } from "./persona-memory/constants.js";
@@ -97,7 +97,7 @@ export function isInboundSessionLogEntry(entry: SessionLogEntry | unknown): entr
 }
 
 function summarizeInboundEntry(entry: SessionInboundLogEntry): string {
-	return collapseSummaryLines(summarizeBlocks(entry.blocks ?? []));
+	return collapseSummaryLines(summarizeInboundEvent(entry));
 }
 
 function summarizeBotEntry(entry: SessionBotOutboundLogEntry): string {
@@ -258,7 +258,7 @@ export async function buildFormationTimeline(input: {
 					buildSpeakerReplyLine(entry.sender.displayName, replyContext),
 					buildSpeakerLine(entry.sender.displayName, summarizeInboundEntry(entry)),
 				]
-			: summarizeBlocks(entry.blocks ?? []);
+			: summarizeInboundEvent(entry);
 		const speaker = isSameInboundEvent(entry, input.currentEvent) ? "User" : "Observed";
 		const turn = formatTimelineTurn(buildInboundHeader(entry, speaker), lines);
 		if (turn) {

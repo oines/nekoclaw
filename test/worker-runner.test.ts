@@ -12,6 +12,8 @@ function createEvent(input: {
 	chatKind: "dm" | "group";
 	messageId: string;
 	replyToMessageId?: string;
+	mentionedUserIds?: string[];
+	mentionedUsernames?: string[];
 	senderId: string;
 	senderName?: string;
 	text: string;
@@ -26,6 +28,8 @@ function createEvent(input: {
 		chatTitle: input.chatTitle,
 		messageId: input.messageId,
 		replyToMessageId: input.replyToMessageId,
+		mentionedUserIds: input.mentionedUserIds,
+		mentionedUsernames: input.mentionedUsernames,
 		sender: { externalId: input.senderId, displayName: input.senderName },
 		blocks: [{ kind: "text", text: input.text }],
 		occurredAt: input.occurredAt,
@@ -297,5 +301,44 @@ describe("buildFormationTurnTranscript", () => {
 		expect(transcript).toContain("Alice: Text: 不行，支付已经炸了");
 		expect(transcript).toContain("Alice reply_to Bot: Text: 我先不重启，等你确认");
 		expect(transcript).toContain("Alice: Text: 那你现在总结一下");
+	});
+
+	it("includes explicit mention metadata in the formation timeline", async () => {
+		const { buildFormationTurnTranscript } = await import("../src/runtime/worker-runner.js");
+
+		const logPath = join(tempDir, "mention-log.jsonl");
+		const currentEvent = createEvent({
+			channelType: "telegram",
+			chatId: "-1001",
+			chatKind: "group",
+			chatTitle: "Ops",
+			messageId: "m-mention-1",
+			mentionedUsernames: ["mock_bot", "db_admin"],
+			senderId: "u1",
+			senderName: "Alice",
+			text: "@mock_bot 让 @db_admin 看看数据库",
+			occurredAt: "2026-04-04T00:00:00.000Z",
+		});
+		appendJsonLine(logPath, buildInboundSessionLogEntry(currentEvent));
+
+		const transcript = await buildFormationTurnTranscript(
+			{
+				getSessionLogPath: () => logPath,
+			} as any,
+			{ slug: "timeline-cat" } as any,
+			{ event: currentEvent },
+			{
+				sessionRecordId: "session-1",
+				channelType: "telegram",
+				chatKind: "group",
+				externalConversationId: "-1001",
+				chatTitle: "Ops",
+			},
+			{ outbound: {} },
+		);
+
+		expect(transcript).toContain("[2026-04-04T00:00:00.000Z] User (telegram:u1 | Alice | scene=Ops):");
+		expect(transcript).toContain("Mentions: @mock_bot, @db_admin");
+		expect(transcript).toContain("Text: @mock_bot 让 @db_admin 看看数据库");
 	});
 });

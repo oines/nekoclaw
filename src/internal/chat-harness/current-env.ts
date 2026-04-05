@@ -11,6 +11,7 @@ import { OutboundDispatchService } from "../../runtime/outbound-dispatch.js";
 import { CommandRouterService } from "../../runtime/command-router.js";
 import { WorkerRunnerService } from "../../runtime/worker-runner.js";
 import { PersonaMemoryService } from "../../runtime/persona-memory.js";
+import { PERSONA_INDEX_PLACEHOLDER } from "../../runtime/persona-memory/constants.js";
 import { getRuntimeKey } from "../../runtime/runtime-key.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
 import type {
@@ -526,7 +527,7 @@ function ensureScenarioPersonaLayout(context: ScenarioContext): void {
 	mkdirSync(context.store.getPersonaObservationsDir(context.agent.slug), { recursive: true });
 	const indexPath = context.store.getPersonaIndexPath(context.agent.slug);
 	if (!existsSync(indexPath)) {
-		writeFileSync(indexPath, "", "utf-8");
+		writeFileSync(indexPath, PERSONA_INDEX_PLACEHOLDER, "utf-8");
 	}
 }
 

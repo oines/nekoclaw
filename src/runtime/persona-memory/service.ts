@@ -9,13 +9,13 @@ import { JsonNekoclawStore } from "../../store/json-store.js";
 import { ensureParentDir, readJsonFile, readJsonLines, readTextFile, removeFileIfExists, withFileLock, writeJsonFile, writeTextFile } from "../../store/fs.js";
 import { StorePaths } from "../../store/paths.js";
 import type { AgentSpec, InboundMessageEvent, PreparedPersonaContext, SessionRecord, WorkerPayload } from "../../types.js";
-import { DREAM_INTERVAL_MS, FORMATION_MAX_RETRIES, INDEX_TOKEN_BUDGET } from "./constants.js";
+import { DREAM_INTERVAL_MS, FORMATION_MAX_RETRIES, INDEX_TOKEN_BUDGET, PERSONA_INDEX_PLACEHOLDER } from "./constants.js";
 import { buildDreamPrompt, buildDreamSkipKey } from "./dream.js";
 import { buildFormationBacklogPrompt, buildFormationTurnPrompt } from "./formation.js";
 import { buildDreamCorpusSnapshot } from "./manifest.js";
 import { createMaintenanceClone, destroyMaintenanceClone, executeMaintenanceSession, syncMaintenanceClone } from "./maintenance-agent.js";
 import { buildObservationSignature, buildSceneMemoryPath, buildSceneRef, collectEventText, formatObservationLine, shouldRunFormationForObservations, takeTailLinesWithinBudget, trimToTokenBudget } from "./observations.js";
-import { extractFrontmatterBlock, splitMarkdownSections } from "./parser.js";
+import { extractFrontmatterBlock, hasSubstantivePersonaIndexContent, splitMarkdownSections } from "./parser.js";
 import { PersonaPaths } from "./paths.js";
 import { selectRelevantPersonaMemories } from "./selector.js";
 import { resolveReplyContext, type SessionLogEntry } from "../session-log.js";
@@ -309,7 +309,7 @@ export class PersonaMemoryService {
 			}
 		}
 		const snapshot = buildDreamCorpusSnapshot(paths);
-		if (snapshot.indexSizeBytes === 0 && snapshot.manifest.length === 0 && snapshot.observations.length === 0) {
+		if (!snapshot.indexHasSubstantiveContent && snapshot.manifest.length === 0 && snapshot.observations.length === 0) {
 			this.auditDreamSkip(agent, "no_memory_files", {});
 			return "no_memory_files";
 		}
@@ -355,9 +355,26 @@ export class PersonaMemoryService {
 			}
 		}
 		if (!existsSync(paths.indexPath)) {
-			writeTextFile(paths.indexPath, "");
+			writeTextFile(paths.indexPath, PERSONA_INDEX_PLACEHOLDER);
 		}
 		return paths;
+	}
+
+	private ensureSubstantiveIndexAfterMaintenance(
+		tempPersonaDir: string,
+		result: { touchedPaths: string[]; deletedPaths: string[] },
+	): void {
+		const changedMemoryFiles =
+			result.touchedPaths.some((path) => path.startsWith("memory/people/") || path.startsWith("memory/scenes/")) ||
+			result.deletedPaths.some((path) => path.startsWith("memory/people/") || path.startsWith("memory/scenes/"));
+		if (!changedMemoryFiles) {
+			return;
+		}
+		const indexMarkdown = readTextFile(join(tempPersonaDir, "index.md"), "");
+		if (hasSubstantivePersonaIndexContent(indexMarkdown)) {
+			return;
+		}
+		throw new Error("Persona maintenance changed memory files but index.md is still blank or left at the bootstrap placeholder.");
 	}
 
 	private async readSceneObservations(
@@ -648,9 +665,10 @@ export class PersonaMemoryService {
 						chatTitle: input.session.chatTitle ?? input.event.chatTitle,
 						senderId: input.event.sender.externalId,
 						senderDisplayName: input.event.sender.displayName,
-					}),
-						resolveModel: this.resolveModel.bind(this),
+						}),
+							resolveModel: this.resolveModel.bind(this),
 					});
+				this.ensureSubstantiveIndexAfterMaintenance(clone.tempPersonaDir, result);
 				syncMaintenanceClone(clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: false });
 				const consumeCount = Math.max(0, Math.min(observationLines.length, result.finalize.consumeObservationLines ?? 0));
 				const remaining = observationLines.slice(consumeCount).join("\n");
@@ -682,7 +700,7 @@ export class PersonaMemoryService {
 		}
 		this.clearDreamSkipAudit(agent.agentId);
 		const snapshot = buildDreamCorpusSnapshot(paths);
-		if (snapshot.indexSizeBytes === 0 && snapshot.manifest.length === 0 && snapshot.observations.length === 0) {
+		if (!snapshot.indexHasSubstantiveContent && snapshot.manifest.length === 0 && snapshot.observations.length === 0) {
 			this.auditDreamSkip(agent, "no_memory_files", {});
 			return;
 		}
@@ -709,6 +727,7 @@ export class PersonaMemoryService {
 					prompt: buildDreamPrompt(snapshot),
 					resolveModel: this.resolveModel.bind(this),
 				});
+				this.ensureSubstantiveIndexAfterMaintenance(clone.tempPersonaDir, result);
 				syncMaintenanceClone(clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: true });
 				const updatedSnapshot = buildDreamCorpusSnapshot(paths);
 				this.store.audit(agent.agentId, "persona.dream_applied", {
@@ -772,6 +791,7 @@ export class PersonaMemoryService {
 						}),
 						resolveModel: this.resolveModel.bind(this),
 					});
+					this.ensureSubstantiveIndexAfterMaintenance(clone.tempPersonaDir, result);
 					syncMaintenanceClone(clone.livePersonaDir, clone.tempPersonaDir, result, { allowDeletes: false });
 					const consumeCount = Math.max(0, Math.min(observationLines.length, result.finalize.consumeObservationLines ?? 0));
 					const remaining = observationLines.slice(consumeCount).join("\n");

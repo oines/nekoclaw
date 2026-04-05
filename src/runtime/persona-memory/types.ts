@@ -39,6 +39,7 @@ export interface DreamCorpusSnapshot {
 	indexPresent: boolean;
 	indexMtimeMs: number;
 	indexSizeBytes: number;
+	indexHasSubstantiveContent: boolean;
 	manifest: PersonaMemoryManifestEntry[];
 	observations: DreamObservationEntry[];
 	memoryManifestText: string;

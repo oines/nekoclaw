@@ -1,6 +1,15 @@
 import { openSync, readSync, closeSync } from "node:fs";
-import { MANIFEST_SCAN_MAX_BYTES, MANIFEST_TEXT_MAX_CHARS } from "./constants.js";
+import { MANIFEST_SCAN_MAX_BYTES, MANIFEST_TEXT_MAX_CHARS, PERSONA_INDEX_PLACEHOLDER } from "./constants.js";
 import type { ParsedPersonaMemoryFile } from "./types.js";
+
+export function isPersonaIndexPlaceholderContent(value: string): boolean {
+	return value.trim() === PERSONA_INDEX_PLACEHOLDER.trim();
+}
+
+export function hasSubstantivePersonaIndexContent(value: string): boolean {
+	const trimmed = value.trim();
+	return trimmed.length > 0 && !isPersonaIndexPlaceholderContent(value);
+}
 
 export function trimManifestText(value: string, maxChars = MANIFEST_TEXT_MAX_CHARS): string {
 	const normalized = value.replace(/\s+/g, " ").trim();

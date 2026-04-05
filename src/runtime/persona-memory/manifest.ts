@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { readTextFile } from "../../store/fs.js";
 import { MANIFEST_SCAN_MAX_FILES } from "./constants.js";
-import { deriveRoutingSummary, parsePersonaMemoryFile, readFileHeaderWindow } from "./parser.js";
+import { deriveRoutingSummary, hasSubstantivePersonaIndexContent, parsePersonaMemoryFile, readFileHeaderWindow } from "./parser.js";
 import { PersonaPaths } from "./paths.js";
 import type { DreamCorpusSnapshot, DreamObservationEntry, PersonaMemoryManifestEntry } from "./types.js";
 
@@ -95,6 +95,8 @@ export function buildDreamCorpusSnapshot(paths: PersonaPaths): DreamCorpusSnapsh
 	);
 	const indexPresent = existsSync(paths.indexPath);
 	const indexStats = indexPresent ? statSync(paths.indexPath) : undefined;
+	const indexContent = indexPresent ? readTextFile(paths.indexPath, "") : "";
+	const indexHasSubstantiveContent = hasSubstantivePersonaIndexContent(indexContent);
 	const signatureSeed = [
 		`index:index.md:${indexStats?.mtimeMs ?? 0}`,
 		...manifest.map((entry) => `memory:${entry.path}:${entry.mtimeMs}`),
@@ -104,6 +106,7 @@ export function buildDreamCorpusSnapshot(paths: PersonaPaths): DreamCorpusSnapsh
 		indexPresent,
 		indexMtimeMs: indexStats?.mtimeMs ?? 0,
 		indexSizeBytes: indexStats?.size ?? 0,
+		indexHasSubstantiveContent,
 		manifest,
 		observations,
 		memoryManifestText: formatPersonaMemoryManifest(manifest),

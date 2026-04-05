@@ -1,4 +1,10 @@
 export const INDEX_TOKEN_BUDGET = 2_000;
+export const PERSONA_INDEX_PLACEHOLDER = [
+	"# 记忆索引",
+	"",
+	"暂时还没有沉淀出的长期记忆。后续在这里维护人物和场景索引。",
+	"",
+].join("\n");
 export const SCENE_OBSERVATION_MAX_LINES = 80;
 export const SCENE_OBSERVATION_TOKEN_BUDGET = 1_200;
 export const FORMATION_TIMELINE_MAX_EVENTS = 20;

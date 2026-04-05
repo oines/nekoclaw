@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AdminIdentity, AgentConfig, AgentSpec, ChannelType } from "../types.js";
+import { PERSONA_INDEX_PLACEHOLDER } from "../runtime/persona-memory/constants.js";
 import { readTextFile, writeTextFile } from "./fs.js";
 import { ConfigRepository } from "./config-repository.js";
 import {
@@ -280,7 +281,7 @@ export class AgentStore {
 			writeTextFile(this.paths.getMemoryPath(agent.slug), "");
 		}
 		if (!existsSync(this.paths.getPersonaIndexPath(agent.slug))) {
-			writeTextFile(this.paths.getPersonaIndexPath(agent.slug), "");
+			writeTextFile(this.paths.getPersonaIndexPath(agent.slug), PERSONA_INDEX_PLACEHOLDER);
 		}
 		this.installBuiltInSkills(agent.slug);
 	}

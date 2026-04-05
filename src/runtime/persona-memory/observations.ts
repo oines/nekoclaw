@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { summarizeBlocks } from "../../messages.js";
+import { formatInboundMentionTargets, summarizeBlocks } from "../../messages.js";
 import type { TokenCountResult } from "../token-service.js";
 import type { InboundMessageEvent, ReplyPayload, SessionRecord } from "../../types.js";
 import { FORMATION_MAX_WAIT_MS, FORMATION_MIN_OBSERVATION_LINES, SCENE_OBSERVATION_MAX_LINES, SCENE_OBSERVATION_TOKEN_BUDGET } from "./constants.js";
@@ -118,12 +118,14 @@ export function formatObservationLine(event: InboundMessageEvent, replyContext?:
 		event.chatKind === "group" && event.chatTitle?.trim()
 			? ` | scene=${event.chatTitle.trim()}`
 			: "";
+	const mentionTargets = formatInboundMentionTargets(event);
+	const mentionLabel = mentionTargets.length > 0 ? ` | mentions=${mentionTargets.join(", ")}` : "";
 	const content = collectEventText(event).trim();
 	if (!replyContext) {
-		return `[${event.occurredAt}] ${speaker}${displayName}${sceneLabel}: ${content}`;
+		return `[${event.occurredAt}] ${speaker}${displayName}${sceneLabel}${mentionLabel}: ${content}`;
 	}
 	return [
-		`[${event.occurredAt}] ${speaker}${displayName}${sceneLabel} ${buildReplyToClause(replyContext)}`,
+		`[${event.occurredAt}] ${speaker}${displayName}${sceneLabel}${mentionLabel} ${buildReplyToClause(replyContext)}`,
 		buildSpeakerLine(event.sender.displayName, content),
 	].join("\n");
 }

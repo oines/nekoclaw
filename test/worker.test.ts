@@ -277,4 +277,94 @@ describe("worker runtime", () => {
 		expect(sessionManagerState.leafId).toBe("entry-prev");
 		expect(rewriteFile).toHaveBeenCalledTimes(1);
 	});
+
+	it("includes explicit mention metadata in the current inbound prompt", async () => {
+		let capturedPrompt = "";
+
+		vi.doMock("@mariozechner/pi-coding-agent", () => {
+			class FakeSettingsManager {
+				static inMemory() {
+					return {};
+				}
+			}
+
+			class FakeAuthStorage {
+				static inMemory() {
+					return {};
+				}
+			}
+
+			class FakeModelRegistry {
+				constructor() {}
+				find() {
+					return undefined;
+				}
+			}
+
+			class FakeDefaultResourceLoader {
+				constructor() {}
+				async reload() {}
+			}
+
+			class FakeSessionManager {
+				static create() {
+					return {
+						sessionFile: undefined as string | undefined,
+						fileEntries: [],
+						byId: new Map(),
+						leafId: null,
+						setSessionFile(path: string) {
+							this.sessionFile = path;
+						},
+						_buildIndex() {},
+						_rewriteFile() {},
+					};
+				}
+			}
+
+			return {
+				AuthStorage: FakeAuthStorage,
+				codingTools: [],
+				createAgentSession: vi.fn(async () => {
+					const sessionState = { messages: [] as Message[] };
+					return {
+						session: {
+							state: sessionState,
+							agent: {
+								state: sessionState,
+								setSystemPrompt: vi.fn(),
+								setAfterToolCall: vi.fn(),
+								waitForIdle: vi.fn(async () => undefined),
+							},
+							bindExtensions: vi.fn(async () => undefined),
+							prompt: vi.fn(async (text: string) => {
+								capturedPrompt = text;
+								sessionState.messages.push({
+									role: "assistant",
+									content: [{ type: "text", text: "ok" }],
+									timestamp: Date.now(),
+								});
+							}),
+						},
+					};
+				}),
+				DefaultResourceLoader: FakeDefaultResourceLoader,
+				ModelRegistry: FakeModelRegistry,
+				SessionManager: FakeSessionManager,
+				SettingsManager: FakeSettingsManager,
+			};
+		});
+
+		const { runWorker } = await import("../src/runtime/worker.js");
+		const payload = createPayload();
+		payload.job.event.mentionedUsernames = ["mock_bot", "db_admin"];
+		payload.job.event.blocks = [{ kind: "text", text: "@mock_bot 让 @db_admin 看看数据库" }];
+
+		const result = await runWorker(payload);
+
+		expect(result.outbound.text).toBe("ok");
+		expect(capturedPrompt).toContain("Content:");
+		expect(capturedPrompt).toContain("- Mentions: @mock_bot, @db_admin");
+		expect(capturedPrompt).toContain("- Text: @mock_bot 让 @db_admin 看看数据库");
+	});
 });

@@ -1,7 +1,7 @@
 import { complete, type Api, type Context, type Model } from "@mariozechner/pi-ai";
 import type { PersonaMemoryManifestEntry } from "./types.js";
 
-const SELECTOR_TIMEOUT_MS = 5_000;
+const SELECTOR_TIMEOUT_MS = 10_000;
 export const SELECTOR_MAX_PATHS = 5;
 
 export interface PersonaMemorySelectorInput {

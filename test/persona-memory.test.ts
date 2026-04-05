@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PERSONA_INDEX_PLACEHOLDER } from "../src/runtime/persona-memory/constants.js";
 import type { InboundMessageEvent } from "../src/types.js";
 
 function createEvent(input: {
@@ -10,6 +11,8 @@ function createEvent(input: {
 	chatKind: "dm" | "group";
 	messageId: string;
 	replyToMessageId?: string;
+	mentionedUserIds?: string[];
+	mentionedUsernames?: string[];
 	senderId: string;
 	senderName: string;
 	text: string;
@@ -24,6 +27,8 @@ function createEvent(input: {
 		chatTitle: input.chatTitle,
 		messageId: input.messageId,
 		replyToMessageId: input.replyToMessageId,
+		mentionedUserIds: input.mentionedUserIds,
+		mentionedUsernames: input.mentionedUsernames,
 		sender: { externalId: input.senderId, displayName: input.senderName },
 		blocks: [{ kind: "text", text: input.text }],
 		occurredAt: input.occurredAt,
@@ -95,6 +100,19 @@ describe("persona memory service", () => {
 		const { MAINTENANCE_TIMEOUT_MS } = await import("../src/runtime/persona-memory/constants.js");
 
 		expect(MAINTENANCE_TIMEOUT_MS).toBe(600_000);
+	});
+
+	it("initializes index.md with a bootstrap placeholder instead of leaving it empty", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { PERSONA_INDEX_PLACEHOLDER } = await import("../src/runtime/persona-memory/constants.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "placeholder-index-cat" });
+		const personaMemory = new PersonaMemoryService(store);
+
+		expect(personaMemory.requestDream(agent, { force: true })).toBe("no_memory_files");
+		expect(readFileSync(store.getPersonaIndexPath(agent.slug), "utf-8")).toBe(PERSONA_INDEX_PLACEHOLDER);
 	});
 
 	it("retries missing persona_finalize up to three times and recovers within the same dream session", async () => {
@@ -359,11 +377,45 @@ describe("persona memory service", () => {
 		expect(context.sceneObservations).toContain("支付接口又挂了");
 		expect(context.sceneObservations).toContain("我看看日志，应该是超时");
 		expect(context.sceneObservations).toContain("scene=支付群");
-		expect(context.indexMarkdown).toBe("");
+		expect(context.indexMarkdown).toBe(PERSONA_INDEX_PLACEHOLDER.trimEnd());
 		expect(context.selectedMemoryMarkdowns).toEqual([]);
 		const observationPath = store.getPersonaObservationPath(agent.slug, "telegram-group-1001");
-		expect(readFileSync(observationPath, "utf-8")).toContain("scene=支付群");
-		expect(readFileSync(observationPath, "utf-8")).toContain("群里刚才在聊什么？");
+	expect(readFileSync(observationPath, "utf-8")).toContain("scene=支付群");
+	expect(readFileSync(observationPath, "utf-8")).toContain("群里刚才在聊什么？");
+	});
+
+	it("records explicit at-mentions in scene observations", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "mention-observer-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "88888",
+			chatKind: "group",
+			chatTitle: "运维总群",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		const event = createEvent({
+			channelType: "napcat",
+			chatId: "88888",
+			chatKind: "group",
+			messageId: "m-at-1",
+			mentionedUserIds: ["222"],
+			senderId: "101",
+			senderName: "用户A",
+			text: "帮我看下日志",
+			occurredAt: "2026-04-01T00:00:00.000Z",
+			chatTitle: "运维总群",
+		});
+
+		personaMemory.recordInbound(agent.agentId, session, event);
+		const context = await personaMemory.buildPreparedContext(agent, session, event);
+
+		expect(context.sceneObservations).toContain("mentions=qq:222");
+		expect(context.sceneObservations).toContain("帮我看下日志");
+		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "napcat-group-88888"), "utf-8")).toContain("mentions=qq:222");
 	});
 
 	it("includes reply target context in observations when replying to another user", async () => {
@@ -709,7 +761,7 @@ describe("persona memory service", () => {
 		});
 
 		const contextPromise = personaMemory.buildPreparedContext(agent, session, event);
-		await vi.advanceTimersByTimeAsync(5_100);
+		await vi.advanceTimersByTimeAsync(10_100);
 		const context = await contextPromise;
 
 		expect(context.indexMarkdown).toContain("memory/people/telegram-111.md");
@@ -1250,6 +1302,7 @@ describe("persona memory service", () => {
 	it("does not run formation before 50 observations or 30 minutes have elapsed", async () => {
 		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
 		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { PERSONA_INDEX_PLACEHOLDER } = await import("../src/runtime/persona-memory/constants.js");
 
 		const store = new JsonNekoclawStore();
 		const agent = store.createAgent({ slug: "gated-formation-cat" });
@@ -1282,7 +1335,7 @@ describe("persona memory service", () => {
 		});
 		await waitForBackgroundWork();
 
-		expect(readFileSync(store.getPersonaIndexPath(agent.slug), "utf-8")).toBe("");
+		expect(readFileSync(store.getPersonaIndexPath(agent.slug), "utf-8")).toBe(PERSONA_INDEX_PLACEHOLDER);
 		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-dm-111"), "utf-8")).toContain("GPU 租赁平台");
 		expect(() => readFileSync(join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"), "utf-8")).toThrow();
 	});
@@ -1364,6 +1417,11 @@ describe("persona memory service", () => {
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-dm-111.md"), "utf-8")).toContain("description:");
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-dm-111.md"), "utf-8")).toContain("张三");
 		expect(formationPrompt).toContain("Memory files manifest:");
+		expect(formationPrompt).toContain("If index.md still contains only the initial bootstrap placeholder");
+		expect(formationPrompt).toContain("All route paths written inside index.md are worker-facing paths");
+		expect(formationPrompt).toContain("Write index links as .nekoclaw-persona/memory/...");
+		expect(formationPrompt).toContain("Do not write maintenance-local relative paths like memory/... inside index.md.");
+		expect(formationPrompt).toContain("correct `.nekoclaw-persona/memory/people/xiao-wang.md`");
 		expect(formationPrompt).toContain("Finalize protocol (strict):");
 		expect(formationPrompt).toContain("If this run does not change any memory files, you must still call persona_finalize exactly once with consumeObservationLines=0.");
 		expect(formationPrompt).toContain("After calling persona_finalize, stop immediately and do not use any more tools.");
@@ -1422,6 +1480,79 @@ describe("persona memory service", () => {
 		expect(readFileSync(store.getPersonaIndexPath(agent.slug), "utf-8")).toContain("telegram-group-1001.md");
 		expect(readFileSync(join(store.getPersonaScenesDir(agent.slug), "telegram-group-1001.md"), "utf-8")).toContain("招人");
 		expect(() => readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toThrow();
+	});
+
+	it("fails formation when memory files change but index.md is still only the bootstrap placeholder", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { PERSONA_INDEX_PLACEHOLDER } = await import("../src/runtime/persona-memory/constants.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "placeholder-guard-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "guard-1",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		const event = createEvent({
+			channelType: "telegram",
+			chatId: "guard-1",
+			chatKind: "dm",
+			messageId: "guard-msg-1",
+			senderId: "101",
+			senderName: "用户A",
+			text: "记住我在做支付项目",
+			occurredAt: "2026-04-01T00:00:00.000Z",
+		});
+		personaMemory.recordInbound(agent.agentId, session, event);
+		vi.spyOn(personaMemory as any, "executeMaintenanceSession").mockImplementation(async (_agent: unknown, _effectiveModel: unknown, input: unknown) => {
+			const maintenanceInput = input as { tempPersonaDir: string };
+			writeFileSync(join(maintenanceInput.tempPersonaDir, "index.md"), PERSONA_INDEX_PLACEHOLDER);
+			writeFileSync(
+				join(maintenanceInput.tempPersonaDir, "memory/people/user-a.md"),
+				"---\ntitle: \"用户A\"\ndescription: \"在做支付项目\"\n---\n\n用户A 在做支付项目。\n",
+			);
+			return {
+				finalize: { consumeObservationLines: 1, summary: "memory changed but index untouched" },
+				touchedPaths: ["memory/people/user-a.md"],
+				deletedPaths: [],
+			};
+		});
+		const triggerEvent = createEvent({
+			channelType: "telegram",
+			chatId: "guard-1",
+			chatKind: "dm",
+			messageId: "guard-msg-2",
+			senderId: "101",
+			senderName: "用户A",
+			text: "还有后续吗",
+			occurredAt: "2026-04-01T00:40:00.000Z",
+		});
+
+		const context = await personaMemory.buildPreparedContext(agent, session, triggerEvent);
+		personaMemory.scheduleFormation({
+			agent,
+			session,
+			event: triggerEvent,
+			recentTimeline: "[2026-04-01T00:00:00.000Z] User (telegram:101 | 用户A):\n- Text: 记住我在做支付项目",
+			personaContext: context,
+		});
+		await waitForBackgroundWork();
+
+		expect(existsSync(join(store.getPersonaPeopleDir(agent.slug), "user-a.md"))).toBe(false);
+		expect(readFileSync(store.getPersonaIndexPath(agent.slug), "utf-8")).toBe(PERSONA_INDEX_PLACEHOLDER);
+		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-dm-guard-1"), "utf-8")).toContain("记住我在做支付项目");
+		const audits = store.getAuditEntries(agent.agentId);
+		expect(
+			audits.some(
+				(entry) =>
+					entry.kind === "persona.formation_failed" &&
+					String(entry.details.error).includes("index.md is still blank or left at the bootstrap placeholder"),
+			),
+		).toBe(true);
+		expect(audits.some((entry) => entry.kind === "persona.formation_applied")).toBe(false);
 	});
 
 	it("discards the same backlog after three failed formation attempts and starts accumulating fresh observations again", async () => {
@@ -1660,8 +1791,13 @@ describe("persona memory service", () => {
 		expect(readFileSync(join(store.getPersonaPeopleDir(agent.slug), "known.md"), "utf-8")).toContain("description:");
 		expect(readFileSync(store.getPersonaObservationPath(agent.slug, "telegram-group-1001"), "utf-8")).toContain("这条 observation 应该继续保留");
 		expect(dreamPrompt).toContain("Memory files manifest:");
+		expect(dreamPrompt).toContain("If index.md is still only the bootstrap placeholder");
 		expect(dreamPrompt).toContain("Remove index.md references to memory files that do not exist anymore.");
 		expect(dreamPrompt).toContain("Merge duplicate index.md entries for the same person or scene into a single canonical entry.");
+		expect(dreamPrompt).toContain("All route paths written inside index.md must use the worker-facing `.nekoclaw-persona/memory/...` form.");
+		expect(dreamPrompt).toContain("Do not write maintenance-local relative paths like `memory/...` inside index.md.");
+		expect(dreamPrompt).toContain("If you see legacy `memory/...` paths in index.md, rewrite them");
+		expect(dreamPrompt).toContain("correct `.nekoclaw-persona/memory/people/xiao-wang.md`");
 		expect(dreamPrompt).toContain("For stale people files, the rewritten file should be meaningfully shorter than before.");
 		expect(dreamPrompt).toContain("Rewrite memory in concise natural Chinese Markdown");
 		expect(dreamPrompt).toContain("stable personality, tone, speaking style, and recurring catchphrases");
@@ -1874,6 +2010,10 @@ describe("persona memory service", () => {
 		expect(capturedPrompt).toContain("Do not create or significantly expand a people file unless the person is active enough");
 		expect(capturedPrompt).toContain("Scene memory should read like a useful long-term scene profile");
 		expect(capturedPrompt).toContain("Write memory in concise natural Chinese Markdown");
+		expect(capturedPrompt).toContain("If index.md still contains only the initial bootstrap placeholder");
+		expect(capturedPrompt).toContain("Write index links as .nekoclaw-persona/memory/...");
+		expect(capturedPrompt).toContain("Do not write maintenance-local relative paths like memory/... inside index.md.");
+		expect(capturedPrompt).toContain("Keep route paths worker-readable: `.nekoclaw-persona/memory/...`, never bare `memory/...`.");
 		expect(capturedPrompt).toContain("Update index.md summaries so the worker can notice that a detailed file is worth opening later.");
 		expect(capturedPrompt).toContain("Finalize protocol (strict):");
 		expect(capturedPrompt).toContain("If this run does not change any memory files, you must still call persona_finalize exactly once with consumeObservationLines=0.");
