@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { Client, ELoggerLevel, type MessageEvent, type Segment, type TElements } from "onebot-client-next";
 import { isExplicitlyAddressedEvent } from "../command-parsing.js";
 import { downloadBinary, persistAttachment, readLocalBinary } from "../media.js";
@@ -31,6 +32,15 @@ type NapcatMessageEventName =
 	| "message.private.group"
 	| "message.group.normal"
 	| "message.group.notice";
+type NapcatFileSegment = {
+	type: "file";
+	data: {
+		file: string;
+		name: string;
+	};
+};
+type NapcatOutboundSegment = Segment.TSegment | NapcatFileSegment;
+type NapcatOutboundElements = string | NapcatOutboundSegment | NapcatOutboundSegment[];
 
 export interface NapcatClientLike {
 	on(event: string, handler: (value: unknown) => void): this;
@@ -229,7 +239,7 @@ export function mapNapcatMessageToEvent(
 }
 
 function toTextElements(text: string, replyToId?: string): TElements {
-	const segments: Segment.TSegment[] = [];
+	const segments: NapcatOutboundSegment[] = [];
 	if (replyToId) {
 		segments.push({
 			type: "reply",
@@ -240,15 +250,62 @@ function toTextElements(text: string, replyToId?: string): TElements {
 		type: "text",
 		data: { text },
 	});
-	return segments;
+	return segments as TElements;
 }
 
-function toAttachmentElements(
+function inferAttachmentName(source: string | undefined, fallback: string): string {
+	if (!source) {
+		return fallback;
+	}
+	if (isHttpUrl(source)) {
+		try {
+			const pathname = new URL(source).pathname;
+			const candidate = basename(pathname);
+			return candidate || fallback;
+		} catch {
+			return fallback;
+		}
+	}
+	const candidate = basename(source);
+	return candidate || fallback;
+}
+
+async function encodeNapcatOutboundAttachment(
+	attachment: NonNullable<ReplyPayload["attachments"]>[number],
+): Promise<NapcatOutboundSegment> {
+	const source = attachment.filePath ?? attachment.url;
+	if (!source) {
+		throw new Error("Outbound media requires either filePath or url");
+	}
+	if (attachment.kind === "image") {
+		if (isAccessibleLocalPath(source)) {
+			const data = readLocalBinary(source);
+			return {
+				type: "image",
+				data: { file: `base64://${Buffer.from(data).toString("base64")}` },
+			};
+		}
+		return {
+			type: "image",
+			data: { file: source },
+		};
+	}
+	const data = isAccessibleLocalPath(source) ? readLocalBinary(source) : await downloadBinary(source);
+	return {
+		type: "file",
+		data: {
+			file: `base64://${Buffer.from(data).toString("base64")}`,
+			name: attachment.name ?? inferAttachmentName(source, "attachment"),
+		},
+	};
+}
+
+async function toAttachmentElements(
 	attachment: NonNullable<ReplyPayload["attachments"]>[number],
 	text?: string,
 	replyToId?: string,
-): TElements {
-	const segments: Segment.TSegment[] = [];
+): Promise<TElements> {
+	const segments: NapcatOutboundSegment[] = [];
 	if (replyToId) {
 		segments.push({
 			type: "reply",
@@ -261,25 +318,8 @@ function toAttachmentElements(
 			data: { text },
 		});
 	}
-	const source = attachment.filePath ?? attachment.url;
-	if (!source) {
-		throw new Error("Outbound media requires either filePath or url");
-	}
-	segments.push(
-		attachment.kind === "image"
-			? {
-					type: "image",
-					data: { file: source },
-				}
-			: ({
-					type: "file",
-					data: {
-						file: source,
-						name: attachment.name ?? "attachment",
-					},
-				} as unknown as Segment.TSegment),
-	);
-	return segments;
+	segments.push(await encodeNapcatOutboundAttachment(attachment));
+	return segments as TElements;
 }
 
 function decodeBase64(base64: string): Uint8Array {
@@ -802,7 +842,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 				const messageId = await this.sendMessage(
 					chatId,
 					chatKind,
-					toAttachmentElements(attachment, first ? payload.text : undefined, first ? replyToId : undefined),
+					await toAttachmentElements(attachment, first ? payload.text : undefined, first ? replyToId : undefined),
 				);
 				refs.push({
 					chatId,
@@ -828,7 +868,7 @@ export class NapcatChannelPlugin implements ChannelPlugin {
 		return refs;
 	}
 
-	private async sendMessage(chatId: string, chatKind: ChatKind, message: TElements): Promise<unknown> {
+	private async sendMessage(chatId: string, chatKind: ChatKind, message: NapcatOutboundElements): Promise<unknown> {
 		try {
 			return await (chatKind === "group"
 				? this.client.CallApi("send_group_msg", {

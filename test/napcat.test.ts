@@ -781,9 +781,56 @@ describe("napcat channel plugin", () => {
 			"send_group_msg",
 			expect.objectContaining({
 				group_id: 777,
-				message: [expect.objectContaining({ type: "file" })],
+				message: [
+					expect.objectContaining({
+						type: "file",
+						data: expect.objectContaining({
+							file: expect.stringMatching(/^base64:\/\//),
+							name: "spec.pdf",
+						}),
+					}),
+				],
 			}),
 		);
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("surfaces NapCat file send failures instead of pretending success", async () => {
+		const plugin = await createTestPlugin();
+		const client = clientMocks.instances[0];
+		const tempDir = mkdtempSync(join(tmpdir(), "nekoclaw-napcat-"));
+		const filePath = join(tempDir, "spec.pdf");
+		writeFileSync(filePath, Buffer.from([2]));
+		client.callApi.mockImplementation(async (action: string, params: Record<string, unknown>) => {
+			if (action === "send_group_msg") {
+				const message = params.message as Array<{ type?: string }>;
+				if (Array.isArray(message) && message.some((segment) => segment.type === "file")) {
+					throw new Error("upload stream not supported");
+				}
+				return 202;
+			}
+			if (action === "send_private_msg") {
+				return 101;
+			}
+			if (action === "get_group_info") {
+				return client.groupInfo.get(String(params.group_id));
+			}
+			if (action === "get_group_list") {
+				return client.groupList;
+			}
+			return undefined;
+		});
+
+		await expect(
+			plugin.actions.send({
+				chatId: "777",
+				chatKind: "group",
+				payload: {
+					attachments: [{ kind: "file", filePath, name: "spec.pdf" }],
+				},
+			}),
+		).rejects.toThrow("upload stream not supported");
+
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 

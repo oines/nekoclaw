@@ -203,13 +203,15 @@ describe("internal chat harness", () => {
 				"dm_file_attachment",
 				"dm_multi_file_attachment",
 				"dm_image_text_mixed",
+				"outbound_file_attachment",
+				"outbound_image_attachment",
 				"tool_proactive_send_message",
 			],
 			executeJob,
 		});
 
 		expect(report.ok).toBe(true);
-		expect(report.results).toHaveLength(22);
+		expect(report.results).toHaveLength(24);
 		expect(report.results.every((result) => result.status === "passed")).toBe(true);
 		expect(report.results.some((result) => result.channel === "telegram")).toBe(true);
 		expect(report.results.some((result) => result.channel === "napcat")).toBe(true);
@@ -220,6 +222,22 @@ describe("internal chat harness", () => {
 			const proactiveResult = report.results.find((result) => result.channel === channel && result.name === "tool_proactive_send_message");
 			expect(proactiveResult?.evidence.transcript.some((entry) => entry.kind === "outbound" && entry.text?.includes("HARNESS_TARGET_OK"))).toBe(true);
 		}
+		const napcatOutboundFile = report.results.find((result) => result.channel === "napcat" && result.name === "outbound_file_attachment");
+		expect(
+			napcatOutboundFile?.evidence.transcript.some(
+				(entry) =>
+					entry.kind === "outbound" &&
+					entry.attachments?.some((attachment) => attachment.kind === "file" && attachment.source?.startsWith("base64://")),
+			),
+		).toBe(true);
+		const napcatOutboundImage = report.results.find((result) => result.channel === "napcat" && result.name === "outbound_image_attachment");
+		expect(
+			napcatOutboundImage?.evidence.transcript.some(
+				(entry) =>
+					entry.kind === "outbound" &&
+					entry.attachments?.some((attachment) => attachment.kind === "image" && attachment.source?.startsWith("base64://")),
+			),
+		).toBe(true);
 	}, 20_000);
 
 	it("lets another session reply first when one session is blocked in the real telegram routing path", async () => {

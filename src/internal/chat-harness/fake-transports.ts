@@ -238,6 +238,29 @@ function normalizeNapcatText(message: unknown): { text?: string; replyToId?: str
 	};
 }
 
+function isUriLike(value: string | undefined): value is string {
+	return typeof value === "string" && /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value);
+}
+
+function isSupportedNapcatImageSource(value: string | undefined): boolean {
+	return typeof value === "string" && (/^https?:\/\//i.test(value) || /^base64:\/\//i.test(value));
+}
+
+function assertSupportedNapcatOutgoingMessage(message: unknown): void {
+	if (!Array.isArray(message)) {
+		return;
+	}
+	for (const segment of message as Array<{ type?: string; data?: Record<string, unknown> }>) {
+		const source = typeof segment.data?.file === "string" ? segment.data.file : undefined;
+		if (segment.type === "image" && source && !isSupportedNapcatImageSource(source)) {
+			throw new Error(`文件处理失败: 识别URL失败, uri= ${source}`);
+		}
+		if (segment.type === "file" && source && !isUriLike(source)) {
+			throw new Error(`文件处理失败: 识别URL失败, uri= ${source}`);
+		}
+	}
+}
+
 export class FakeNapcatClient implements NapcatClientLike {
 	readonly transcript: HarnessTranscriptEntry[] = [];
 
@@ -266,6 +289,7 @@ export class FakeNapcatClient implements NapcatClientLike {
 
 	async CallApi(action: string, params: Record<string, unknown>): Promise<unknown> {
 		if (action === "send_group_msg" || action === "send_private_msg") {
+			assertSupportedNapcatOutgoingMessage(params.message);
 			const parsed = normalizeNapcatText(params.message);
 			const chatKind: ChatKind = action === "send_group_msg" ? "group" : "dm";
 			const chatId = chatKind === "group" ? String(params.group_id) : String(params.user_id);

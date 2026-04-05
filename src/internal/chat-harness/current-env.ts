@@ -475,6 +475,19 @@ async function expectLatestOutboundContainsAll(
 	return outbound;
 }
 
+async function expectLatestOutboundAttachment(
+	context: ScenarioContext,
+	chatId: string,
+	kind: "image" | "file",
+): Promise<NonNullable<HarnessTranscriptEntry["attachments"]>[number]> {
+	await waitForQueueIdle(context);
+	const outbound = latestOutbound(context.driver, chatId);
+	assertCondition(outbound, `Expected outbound message for chat ${chatId}`);
+	const attachment = outbound.attachments?.find((entry) => entry.kind === kind);
+	assertCondition(attachment, `Expected latest outbound for chat ${chatId} to include a ${kind} attachment`);
+	return attachment;
+}
+
 function transcriptForChat(driver: HarnessDriver, chatId: string): string[] {
 	return driver
 		.getTranscript()
@@ -1254,6 +1267,78 @@ async function scenarioDmImageTextMixed(context: ScenarioContext): Promise<void>
 		"Expected the mixed image to be persisted into the session attachments directory",
 	);
 	await expectLatestOutboundContainsAll(context, context.dmUserId, [/stop/i]);
+}
+
+async function scenarioNapcatOutboundFileAttachment(context: ScenarioContext): Promise<void> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "pair me",
+	});
+	const session = await acceptPendingPair(context, context.dmUserId);
+	const fixture = context.createWorkspaceFixture({
+		relativePath: "fixtures/outbound-note.txt",
+		bytes: FILE_SECRET_BYTES,
+	});
+	await context.outboundDispatch.executeToolActions(context.agent, session, [
+		{
+			kind: "send",
+			payload: {
+				text: "Outbound file fixture",
+				attachments: [
+					{
+						kind: "file",
+						filePath: fixture.containerPath,
+						name: "outbound-note.txt",
+						mimeType: "text/plain",
+					},
+				],
+			},
+		},
+	]);
+	const attachment = await expectLatestOutboundAttachment(context, context.dmUserId, "file");
+	assertCondition(
+		typeof attachment.source === "string" && attachment.source.startsWith("base64://"),
+		`Expected NapCat outbound file attachment to use base64:// payload, got "${attachment.source ?? ""}"`,
+	);
+}
+
+async function scenarioNapcatOutboundImageAttachment(context: ScenarioContext): Promise<void> {
+	await sendAndWait(context, {
+		chatKind: "dm",
+		chatId: context.dmUserId,
+		senderId: context.dmUserId,
+		senderName: "Harness DM",
+		text: "pair me",
+	});
+	const session = await acceptPendingPair(context, context.dmUserId);
+	const fixture = context.createWorkspaceFixture({
+		relativePath: "fixtures/outbound-image.png",
+		bytes: RED_PNG_BYTES,
+	});
+	await context.outboundDispatch.executeToolActions(context.agent, session, [
+		{
+			kind: "send",
+			payload: {
+				text: "Outbound image fixture",
+				attachments: [
+					{
+						kind: "image",
+						filePath: fixture.containerPath,
+						name: "outbound-image.png",
+						mimeType: "image/png",
+					},
+				],
+			},
+		},
+	]);
+	const attachment = await expectLatestOutboundAttachment(context, context.dmUserId, "image");
+	assertCondition(
+		typeof attachment.source === "string" && attachment.source.startsWith("base64://"),
+		`Expected NapCat outbound image attachment to use base64:// payload, got "${attachment.source ?? ""}"`,
+	);
 }
 
 async function scenarioPersonaGroupObservationRecall(context: ScenarioContext): Promise<HarnessReplyJudgeResult> {
@@ -2317,6 +2402,8 @@ const SCENARIOS: ScenarioDefinition[] = [
 	{ name: "dm_file_attachment", channel: "napcat", category: "general", run: scenarioDmFileAttachment },
 	{ name: "dm_multi_file_attachment", channel: "napcat", category: "general", run: scenarioDmMultiFileAttachment },
 	{ name: "dm_image_text_mixed", channel: "napcat", category: "general", run: scenarioDmImageTextMixed },
+	{ name: "outbound_file_attachment", channel: "napcat", category: "general", run: scenarioNapcatOutboundFileAttachment },
+	{ name: "outbound_image_attachment", channel: "napcat", category: "general", run: scenarioNapcatOutboundImageAttachment },
 	{ name: "group_mention_ignored", channel: "napcat", category: "general", run: scenarioGroupMentionIgnored },
 	{ name: "group_mention_chat", channel: "napcat", category: "general", run: scenarioGroupMentionChat },
 	{ name: "group_reply_chat", channel: "napcat", category: "general", run: scenarioGroupReplyChat },
