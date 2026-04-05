@@ -15,6 +15,7 @@ import { buildFormationBacklogPrompt, buildFormationTurnPrompt } from "./formati
 import { buildDreamCorpusSnapshot } from "./manifest.js";
 import { createMaintenanceClone, destroyMaintenanceClone, executeMaintenanceSession, syncMaintenanceClone } from "./maintenance-agent.js";
 import { buildObservationSignature, buildSceneMemoryPath, buildSceneRef, collectEventText, formatObservationLine, shouldRunFormationForObservations, takeTailLinesWithinBudget, trimToTokenBudget } from "./observations.js";
+import { extractFrontmatterBlock, splitMarkdownSections } from "./parser.js";
 import { PersonaPaths } from "./paths.js";
 import { selectRelevantPersonaMemories } from "./selector.js";
 import { TokenService } from "../token-service.js";
@@ -32,6 +33,105 @@ interface PersonaSelectorPrefetchHandle {
 	result?: PreparedPersonaMemorySelection;
 	error?: string;
 	manifestCount: number;
+}
+
+type CountTextTokens = (value: string) => Promise<Awaited<ReturnType<TokenService["countText"]>>>;
+
+function normalizeSectionText(value: string): string {
+	return value.replace(/\s+/g, " ").trim();
+}
+
+function renderFrontmatterBlock(rawMarkdown: string): string {
+	const normalized = rawMarkdown.replace(/\r\n/g, "\n");
+	if (!normalized.startsWith("---\n")) {
+		return "";
+	}
+	const closingIndex = normalized.indexOf("\n---\n", 4);
+	if (closingIndex === -1) {
+		return "";
+	}
+	return normalized.slice(0, closingIndex + 5).trimEnd();
+}
+
+function scoreMemorySection(
+	kind: "people" | "scene",
+	section: ReturnType<typeof splitMarkdownSections>[number],
+): number {
+	const text = normalizeSectionText([section.heading, section.content].filter(Boolean).join(" "));
+	let score = section.index === 0 ? 12 : Math.max(0, 10 - section.index * 2);
+	if (section.heading) {
+		score += 6;
+	}
+	if (text.length > 0 && text.length <= 220) {
+		score += 4;
+	}
+	if (text.length > 220 && text.length <= 500) {
+		score += 2;
+	}
+	if (kind === "people" && section.heading) {
+		score += 1;
+	}
+	if (kind === "scene" && section.index <= 1) {
+		score += 1;
+	}
+	return score;
+}
+
+function renderMemorySection(section: ReturnType<typeof splitMarkdownSections>[number]): string {
+	if (section.heading && section.content) {
+		return `## ${section.heading}\n\n${section.content}`;
+	}
+	if (section.heading) {
+		return `## ${section.heading}`;
+	}
+	return section.content;
+}
+
+async function prioritizeSelectedMemoryMarkdown(
+	rawMarkdown: string,
+	kind: "people" | "scene",
+	budget: number,
+	countTextTokens: CountTextTokens,
+): Promise<string> {
+	if (!rawMarkdown.trim()) {
+		return rawMarkdown;
+	}
+	const total = await countTextTokens(rawMarkdown);
+	if (total.available && total.tokens <= budget) {
+		return rawMarkdown;
+	}
+	const frontmatterBlock = renderFrontmatterBlock(rawMarkdown);
+	const { body } = extractFrontmatterBlock(rawMarkdown);
+	const sections = splitMarkdownSections(body.trim());
+	if (sections.length === 0) {
+		return await trimToTokenBudget(rawMarkdown, budget, countTextTokens);
+	}
+	const ranked = sections
+		.map((section) => ({
+			section,
+			score: scoreMemorySection(kind, section),
+		}))
+		.sort((a, b) => b.score - a.score || a.section.index - b.section.index);
+	const selectedIndices = new Set<number>();
+	let best = await trimToTokenBudget(rawMarkdown, budget, countTextTokens);
+
+	for (const candidate of ranked) {
+		selectedIndices.add(candidate.section.index);
+		const chosenSections = sections
+			.filter((section) => selectedIndices.has(section.index))
+			.map((section) => renderMemorySection(section))
+			.filter(Boolean)
+			.join("\n\n");
+		const candidateMarkdown = [frontmatterBlock, chosenSections].filter(Boolean).join("\n\n").trim();
+		const counted = await countTextTokens(candidateMarkdown);
+		if (counted.available && counted.tokens > budget) {
+			selectedIndices.delete(candidate.section.index);
+			continue;
+		}
+		best = candidateMarkdown;
+	}
+
+	return best.trim() ? `${best.trimEnd()}\n` : best;
 }
 
 export class PersonaMemoryService {
@@ -387,8 +487,9 @@ export class PersonaMemoryService {
 							kind: entry.kind,
 							title: entry.title,
 							description: entry.description,
-							markdown: await trimToTokenBudget(
+							markdown: await prioritizeSelectedMemoryMarkdown(
 								readTextFile(join(paths.personaDir, entry.path), ""),
+								entry.kind,
 								SELECTED_MEMORY_TOKEN_BUDGET,
 								countTextTokens,
 							),

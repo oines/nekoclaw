@@ -3,7 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { readTextFile } from "../../store/fs.js";
 import { MANIFEST_SCAN_MAX_FILES } from "./constants.js";
-import { parsePersonaMemoryFile, readFileHeaderWindow } from "./parser.js";
+import { deriveRoutingSummary, parsePersonaMemoryFile, readFileHeaderWindow } from "./parser.js";
 import { PersonaPaths } from "./paths.js";
 import type { DreamCorpusSnapshot, DreamObservationEntry, PersonaMemoryManifestEntry } from "./types.js";
 
@@ -60,11 +60,12 @@ export function scanPersonaMemoryManifest(paths: PersonaPaths): PersonaMemoryMan
 			const absolutePath = safeJoinPersonaPath(personaDir, relativePath);
 			const parsed = parsePersonaMemoryFile(relativePath, readFileHeaderWindow(absolutePath));
 			const stats = statSync(absolutePath);
+			const routingSummary = deriveRoutingSummary(parsed);
 			return {
 				path: parsed.path,
 				kind: parsed.kind,
 				title: parsed.title,
-				description: parsed.description,
+				description: routingSummary || parsed.description,
 				mtimeMs: stats.mtimeMs,
 			} satisfies PersonaMemoryManifestEntry;
 		})

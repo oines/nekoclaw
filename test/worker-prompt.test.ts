@@ -143,12 +143,12 @@ describe("worker append prompt", () => {
 		const prompt = buildAppendPrompt(payload, "", "");
 		expect(prompt).toContain("## Persona Index");
 		expect(prompt).toContain("## Selected Persona Memories");
-		expect(prompt).toContain("### memory/people/telegram-111.md");
+		expect(prompt).toContain("### .nekoclaw-persona/memory/people/telegram-111.md");
 		expect(prompt).toContain("## Current Scene Observations");
 		expect(prompt).toContain("`SOUL.md` is the primary source for your style, voice, and personality.");
-		expect(prompt).toContain("check `index.md` first");
+		expect(prompt).toContain("`.nekoclaw-persona/index.md`");
 		expect(prompt).toContain("read the 1-3 most relevant detailed files");
-		expect(prompt).toContain("Strong recall triggers include phrases like \"还记得\", \"上次\", \"之前\"");
+		expect(prompt).toContain("Paths shown in Persona Index and Selected Persona Memories are already worker-readable workspace paths.");
 		expect(prompt).toContain("use the built-in `read` tool");
 		expect(prompt).toContain("Do not guess or rely on index-level summaries alone");
 		expect(prompt).toContain("If Current Scene Observations already contain the answer, summarize those observed facts directly");
@@ -156,7 +156,8 @@ describe("worker append prompt", () => {
 		expect(prompt).toContain("Never turn passive observations into \"we discussed\"");
 		expect(prompt).toContain("Do not lead with cute filler, roleplay deflection");
 		expect(prompt).toContain("Preserve source distinctions");
-		expect(prompt).toContain("The user asks \"你之前答应过我默认用哪个方案\"");
+		expect(prompt).toContain("If the current question depends on a previous default, promise, identity claim, or scene history");
+		expect(prompt).toContain(".nekoclaw-persona/memory/people/telegram-111.md");
 		expect(prompt).not.toContain("## Persona Selection Notes");
 		expect(prompt).not.toContain("## Current Scene Memory");
 	});

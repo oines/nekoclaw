@@ -21,6 +21,7 @@ import { createToolComposition } from "../tools/index.js";
 import type { ChannelToolAction, WorkerPayload, WorkerResult } from "../types.js";
 
 const WORKSPACE_DIR = "/workspace";
+const WORKER_PERSONA_DIR = ".nekoclaw-persona";
 const TERMINAL_NO_REPLY_ERROR_PREFIX = "__NEKOCLAW_TERMINAL_NO_REPLY__:";
 const TERMINAL_NO_REPLY_STOP_REASON = "no_reply";
 
@@ -233,6 +234,20 @@ export function collectPromptImages(
 
 export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: string): string {
 	const hasCurrentImages = payload.job.event.blocks.some((block) => block.kind === "image");
+	const toWorkerPersonaPath = (path: string): string => {
+		if (path === "index.md") {
+			return `${WORKER_PERSONA_DIR}/index.md`;
+		}
+		if (path.startsWith("memory/") || path.startsWith("observations/")) {
+			return `${WORKER_PERSONA_DIR}/${path}`;
+		}
+		return path;
+	};
+	const rewritePersonaPaths = (value: string): string =>
+		value
+			.replace(/\bindex\.md\b/g, `${WORKER_PERSONA_DIR}/index.md`)
+			.replace(/\b(memory\/(?:people|scenes)\/[^\s)]+\.md)\b/g, (_match, path: string) => toWorkerPersonaPath(path))
+			.replace(/\b(observations\/[^\s)]+\.log)\b/g, (_match, path: string) => toWorkerPersonaPath(path));
 	const identityLines = [
 		payload.selfIdentity?.platformUserId
 			? `- Your platform user id in this session: ${payload.selfIdentity.platformUserId}`
@@ -248,19 +263,19 @@ export function buildAppendPrompt(payload: WorkerPayload, soul: string, memory: 
 		? [
 				payload.personaContext.indexMarkdown
 					? `## Persona Index
-${payload.personaContext.indexMarkdown}`
+${rewritePersonaPaths(payload.personaContext.indexMarkdown)}`
 					: "",
 				payload.personaContext.selectedMemoryMarkdowns.length > 0
 					? `## Selected Persona Memories
 ${payload.personaContext.selectedMemoryMarkdowns
 	.map(
 		(entry) =>
-			`### ${entry.path}
+			`### ${toWorkerPersonaPath(entry.path)}
 - Kind: ${entry.kind}
 - Title: ${entry.title || "(untitled)"}
 - Description: ${entry.description || "(no description)"}
 
-${entry.markdown}`,
+${rewritePersonaPaths(entry.markdown)}`,
 	)
 	.join("\n\n")}`
 					: "",
@@ -302,10 +317,11 @@ ${payload.personaContext.sceneObservations}`
 - \`SOUL.md\` is the primary source for your style, voice, and personality.
 - Runtime rules constrain behavior and tool usage; they do not replace your voice.
 - If Persona memory context is present, treat it as the authoritative memory substrate for people and past events.
-- The persona index is your routing map and default memory context: check \`index.md\` first, then read the 1-3 most relevant detailed files it points to when the answer depends on specifics.
-- If the user asks about prior conversations, memory, identity, promises, defaults, people, scenes, or "what happened before", treat that as a strong cue to inspect persona memory instead of answering from vague impression.
-- Strong recall triggers include phrases like "还记得", "上次", "之前", "后来", "我是谁", "那个人", "那个群", "默认按哪个", "你答应过什么", and similar callbacks to earlier context.
-- If a relevant detail file exists and could verify the answer, use the built-in \`read\` tool to open the specific path referenced in \`index.md\` under \`.nekoclaw-persona/memory/\` before answering.
+- The persona index lives at \`${WORKER_PERSONA_DIR}/index.md\` inside this workspace.
+- The persona index is your routing map and default memory context: check \`${WORKER_PERSONA_DIR}/index.md\` first, then read the 1-3 most relevant detailed files it points to when the answer depends on specifics.
+- If the user asks about prior conversations, memory, identity, promises, defaults, people, scenes, or earlier events, inspect persona memory instead of answering from vague impression.
+- Paths shown in Persona Index and Selected Persona Memories are already worker-readable workspace paths. When the index mentions \`memory/...\`, read it as \`${WORKER_PERSONA_DIR}/memory/...\`.
+- If a relevant detail file exists and could verify the answer, use the built-in \`read\` tool to open the specific path referenced in \`${WORKER_PERSONA_DIR}/index.md\` before answering.
 - Do not guess or rely on index-level summaries alone when the user is asking for detail that a referenced memory file can confirm.
 - When useful, combine 1 person file plus 1 scene file so you can answer both who someone is and where/when that information came up.
 - Current Scene Observations are recent passive observations (旁观记录). If you refer to them, make it explicit when you were only observing rather than participating.
@@ -313,14 +329,12 @@ ${payload.personaContext.sceneObservations}`
 - If Current Scene Observations already contain the answer, summarize those observed facts directly instead of stalling, deflecting, or asking the user to repeat them.
 - Do not invent facts beyond what Persona memories or Current Scene Observations support. If evidence is partial, answer the supported part and mark the rest as uncertain.
 - Never turn passive observations into "we discussed" or other participation claims. Keep source distinctions explicit.
-- For recall questions like "群里刚才在聊什么", "还记得", "上次", or "最近忙的那些事", answer the facts first. Do not lead with cute filler, roleplay deflection, or a request for the user to remind you when evidence is already present.
+- For recall-heavy turns, answer the facts first. Do not lead with cute filler, roleplay deflection, or a request for the user to remind you when evidence is already present.
 - Preserve source distinctions: say whether something came from your own participation, passive observation, or a memory file you just checked.
 - Preserve uncertainty markers from the evidence ("可能", "应该", etc.) instead of upgrading them into certainty.
-- Examples:
-- The user asks "上次数据库选型那个事你还记得吗" -> check \`index.md\`, then read the referenced person/scene file before answering.
-- The user asks "你之前答应过我默认用哪个方案" -> read the relevant memory file; do not answer from vibe or only the index summary.
-- The user asks "那个群里后来怎么说的" -> prefer the scene file, and make clear whether you personally participated or only observed.
-- The user asks "我是谁" or corrects identity -> verify the linked person file and preserve uncertainty if identity is still not fully confirmed.
+- If the current question depends on a previous default, promise, identity claim, or scene history, verify it from the relevant memory file before answering.
+- If the current question is about how a group or DM evolved later, prefer the relevant scene file and make clear whether you personally participated or only observed.
+- If the user is asking who they are or correcting identity, verify the linked person file and preserve uncertainty if identity is still not fully confirmed.
 ${hasCurrentImages
 	? `- The current inbound message includes image content. Answer with direct visual facts first.
 - Do NOT use placeholder templates, bracketed fill-ins, canned admiration, or speculative scene descriptions.

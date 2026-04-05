@@ -74,6 +74,112 @@ export function deriveLegacyDescription(body: string): string {
 	return trimManifestText([start, continuation].filter(Boolean).join(" "));
 }
 
+type MarkdownSection = {
+	heading?: string;
+	content: string;
+	index: number;
+};
+
+function normalizeParagraph(value: string): string {
+	return value
+		.replace(/\r\n/g, "\n")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.join(" ")
+		.trim();
+}
+
+function isHeadingLine(line: string): boolean {
+	return /^#{1,6}\s+.+$/.test(line.trim());
+}
+
+export function splitMarkdownSections(body: string): MarkdownSection[] {
+	const lines = body.replace(/\r\n/g, "\n").split("\n");
+	const sections: MarkdownSection[] = [];
+	let currentHeading: string | undefined;
+	let currentLines: string[] = [];
+	let index = 0;
+
+	const flush = () => {
+		const content = normalizeParagraph(currentLines.join("\n"));
+		if (!content && !currentHeading) {
+			return;
+		}
+		sections.push({
+			heading: currentHeading,
+			content,
+			index,
+		});
+		index += 1;
+		currentHeading = undefined;
+		currentLines = [];
+	};
+
+	for (const rawLine of lines) {
+		const line = rawLine.trimEnd();
+		if (isHeadingLine(line)) {
+			flush();
+			currentHeading = line.replace(/^#{1,6}\s+/, "").trim();
+			continue;
+		}
+		currentLines.push(line);
+	}
+	flush();
+	return sections.filter((section) => section.heading || section.content);
+}
+
+function sectionText(section: MarkdownSection): string {
+	return [section.heading, section.content].filter(Boolean).join(": ");
+}
+
+function scoreSection(section: MarkdownSection, kind: ParsedPersonaMemoryFile["kind"]): number {
+	const text = sectionText(section);
+	let score = section.index === 0 ? 12 : Math.max(0, 8 - section.index * 2);
+	if (section.heading) {
+		score += 8;
+	}
+	if (text.length > 0 && text.length <= 220) {
+		score += 4;
+	}
+	if (kind === "people" && section.heading) {
+		score += 2;
+	}
+	if (kind === "scene" && section.index <= 1) {
+		score += 2;
+	}
+	return score;
+}
+
+export function deriveRoutingSummary(entry: ParsedPersonaMemoryFile): string {
+	const sections = splitMarkdownSections(entry.bodyContent);
+	const ranked = sections
+		.map((section) => ({
+			section,
+			score: scoreSection(section, entry.kind),
+		}))
+		.filter((candidate) => candidate.score > 0 || candidate.section.index === 0)
+		.sort((a, b) => b.score - a.score || a.section.index - b.section.index);
+	const parts: string[] = [];
+	for (const part of [
+		...ranked
+			.slice(0, 2)
+			.map((candidate) => sectionText(candidate.section))
+			.filter(Boolean),
+		entry.description,
+	]) {
+		const normalized = normalizeParagraph(part);
+		if (!normalized) {
+			continue;
+		}
+		if (parts.some((existing) => existing === normalized || existing.includes(normalized) || normalized.includes(existing))) {
+			continue;
+		}
+		parts.push(normalized);
+	}
+	return trimManifestText(Array.from(new Set(parts)).join("；"));
+}
+
 export function parsePersonaMemoryFile(relativePath: string, rawContent: string): ParsedPersonaMemoryFile {
 	const { frontmatter, body, hasFrontmatter } = extractFrontmatterBlock(rawContent);
 	const bodyContent = body.trim();

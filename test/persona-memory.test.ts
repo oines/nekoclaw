@@ -702,7 +702,7 @@ describe("persona memory service", () => {
 		expect(manifest).toHaveLength(2);
 		expect(manifest[0]?.path).toBe("memory/people/alice.md");
 		expect(manifest[0]?.title).toBe("Alice");
-		expect(manifest[0]?.description).toBe("Long-time friend who loves photography.");
+		expect(manifest[0]?.description).toContain("Long-time friend who loves photography.");
 		expect(manifest[1]?.path).toBe("memory/scenes/legacy-scene.md");
 		expect(manifest[1]?.title).toBe("TIAL Members");
 		expect(manifest[1]?.description).toContain("People casually chat about projects");
@@ -732,6 +732,58 @@ describe("persona memory service", () => {
 
 		expect(snapshot.memoryManifestText).toContain("- [people] Alice | memory/people/alice.md (");
 		expect(snapshot.memoryManifestText).toContain("Long-time friend who loves photography.");
+	});
+
+	it("derives manifest routing cues from natural markdown details like personality and scene vibe", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "manifest-cue-cat" });
+		const personaMemory = new PersonaMemoryService(store);
+
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "xiao-wang.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: 经常和 bot 聊项目进展。",
+				"---",
+				"",
+				"## 说话方式",
+				"",
+				"小王爱吐槽，常说“笑死”和“离谱”。",
+				"",
+				"## 最近",
+				"",
+				"最近在赶毕业论文。",
+			].join("\n"),
+		);
+		writeTextFile(
+			join(store.getPersonaScenesDir(agent.slug), "group-a.md"),
+			[
+				"---",
+				"title: 技术吹水群",
+				"description: 一个朋友们常驻的群。",
+				"---",
+				"",
+				"## 这个群",
+				"",
+				"平时常聊项目推进和数据库选型，氛围偏熟人吐槽。",
+				"",
+				"## 活跃人物",
+				"",
+				"小王和老李经常出现。",
+			].join("\n"),
+		);
+
+		const snapshot = (personaMemory as any).buildDreamCorpusSnapshot(agent.slug) as { memoryManifestText: string };
+
+		expect(snapshot.memoryManifestText).toContain("爱吐槽");
+		expect(snapshot.memoryManifestText).toContain("毕业论文");
+		expect(snapshot.memoryManifestText).toContain("氛围偏熟人吐槽");
+		expect(snapshot.memoryManifestText).toContain("活跃人物");
 	});
 
 	it("caps persona memory manifest to the 200 most recent files", async () => {
@@ -764,6 +816,86 @@ describe("persona memory service", () => {
 		expect(manifest).toHaveLength(200);
 		expect(manifest.some((entry) => entry.path === "memory/people/person-204.md")).toBe(true);
 		expect(manifest.some((entry) => entry.path === "memory/people/person-000.md")).toBe(false);
+	});
+
+	it("keeps high-value personality and ongoing sections when trimming selected memories for worker context", async () => {
+		const completeMock = vi.fn(async () => ({
+			content: [{ type: "text" as const, text: JSON.stringify({ paths: ["memory/people/telegram-111.md"] }) }],
+		}));
+		vi.doMock("@mariozechner/pi-ai", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+			return {
+				...actual,
+				complete: completeMock,
+			};
+		});
+		fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url.endsWith("/responses/input_tokens")) {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { input?: string };
+				return new Response(
+					JSON.stringify({
+						object: "response.input_tokens",
+						input_tokens: typeof body.input === "string" ? body.input.length : 0,
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { writeTextFile } = await import("../src/store/fs.js");
+
+		const store = new JsonNekoclawStore();
+		let agent = store.createAgent({ slug: "selected-priority-cat" });
+		agent = store.setBuiltinModelConfig(agent.agentId, { provider: "openai", modelId: "gpt-5", apiKey: "test-key" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "111",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		writeTextFile(
+			join(store.getPersonaPeopleDir(agent.slug), "telegram-111.md"),
+			[
+				"---",
+				"title: 小王",
+				"description: 项目负责人。",
+				"---",
+				"",
+				"## 长篇背景",
+				"",
+				"这是一大段背景说明。".repeat(200),
+				"",
+				"## 说话方式",
+				"",
+				"小王爱吐槽，常说“笑死”和“离谱”。",
+				"",
+				"## 最近",
+				"",
+				"最近在赶毕业论文，还在纠结数据库切换。",
+			].join("\n"),
+		);
+		const event = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m-priority",
+			senderId: "111",
+			senderName: "小王",
+			text: "你还记得我平时怎么说话吗",
+			occurredAt: "2026-04-03T00:00:00.000Z",
+		});
+
+		const context = await personaMemory.buildPreparedContext(agent, session, event);
+		const markdown = context.selectedMemoryMarkdowns[0]?.markdown ?? "";
+
+		expect(markdown).toContain("说话方式");
+		expect(markdown).toContain("爱吐槽");
+		expect(markdown).toContain("最近");
+		expect(markdown).toContain("毕业论文");
+		expect(markdown).not.toContain("这是一大段背景说明。这是一大段背景说明。这是一大段背景说明。这是一大段背景说明。");
 	});
 
 	it("builds dream corpus signatures from mtimes instead of full memory content", async () => {
@@ -1223,6 +1355,10 @@ describe("persona memory service", () => {
 		expect(dreamPrompt).toContain("Remove index.md references to memory files that do not exist anymore.");
 		expect(dreamPrompt).toContain("Merge duplicate index.md entries for the same person or scene into a single canonical entry.");
 		expect(dreamPrompt).toContain("For stale people files, the rewritten file should be meaningfully shorter than before.");
+		expect(dreamPrompt).toContain("Rewrite memory in concise natural Chinese Markdown");
+		expect(dreamPrompt).toContain("stable personality, tone, speaking style, and recurring catchphrases");
+		expect(dreamPrompt).toContain("what kind of group/scene it is");
+		expect(dreamPrompt).toContain("Index entries should stay route-oriented");
 		const audits = store.getAuditEntries(agent.agentId);
 		expect(audits.some((entry) => entry.kind === "persona.dream_started")).toBe(true);
 		expect(audits.some((entry) => entry.kind === "persona.dream_applied")).toBe(true);
@@ -1425,6 +1561,11 @@ describe("persona memory service", () => {
 		expect(capturedPrompt).toContain("Bot-visible commitments and obligations stated in Bot turns");
 		expect(capturedPrompt).toContain("Long-term defaults and standing preferences");
 		expect(capturedPrompt).toContain("User identity corrections and links");
+		expect(capturedPrompt).toContain("Stable personality signals for active people");
+		expect(capturedPrompt).toContain("what kind of group/scene this is");
+		expect(capturedPrompt).toContain("Do not create or significantly expand a people file unless the person is active enough");
+		expect(capturedPrompt).toContain("Scene memory should read like a useful long-term scene profile");
+		expect(capturedPrompt).toContain("Write memory in concise natural Chinese Markdown");
 		expect(capturedPrompt).toContain("Update index.md summaries so the worker can notice that a detailed file is worth opening later.");
 		expect(capturedPrompt).toContain("Finalize protocol (strict):");
 		expect(capturedPrompt).toContain("If this run does not change any memory files, you must still call persona_finalize exactly once with consumeObservationLines=0.");

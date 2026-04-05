@@ -21,6 +21,12 @@
 - Prefer improving module boundaries, ownership, and readability over preserving accidental structure.
 - If a part of the codebase is turning into a "shit mountain", treat cleanup or refactor as part of the task rather than leaving it in place and stacking more logic onto it.
 
+## AI-Native Guardrail
+- This is an AI-native project, not a CRUD product. When improving prompts, memory, recall, routing, or other agent-facing behavior, prefer prompt and context design first.
+- Avoid introducing rigid schemas, excessive structured metadata, or CRUD-style field systems at agent-facing boundaries unless they are truly unavoidable.
+- Memory files, prompt substrates, and other agent-consumed artifacts should stay natural and model-friendly by default; do not over-engineer them into database-like structures just because they are easy to parse.
+- If a problem can be solved well through better prompts, routing cues, or lightweight text conventions, prefer that over schema-heavy redesigns.
+
 ## Closed-Loop Validation
 - After implementing a feature, the assistant is responsible for building or extending realistic closed-loop validation as needed.
 - Prefer end-to-end validation over shallow mocks when the feature touches runtime behavior.
