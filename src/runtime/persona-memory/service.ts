@@ -6,7 +6,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { MODEL_ENV_MAP } from "../../model/provider-key.js";
 import { JsonNekoclawStore } from "../../store/json-store.js";
-import { ensureParentDir, readJsonFile, readTextFile, removeFileIfExists, withFileLock, writeJsonFile, writeTextFile } from "../../store/fs.js";
+import { ensureParentDir, readJsonFile, readJsonLines, readTextFile, removeFileIfExists, withFileLock, writeJsonFile, writeTextFile } from "../../store/fs.js";
 import { StorePaths } from "../../store/paths.js";
 import type { AgentSpec, InboundMessageEvent, PreparedPersonaContext, SessionRecord, WorkerPayload } from "../../types.js";
 import { DREAM_INTERVAL_MS, FORMATION_MAX_RETRIES, INDEX_TOKEN_BUDGET } from "./constants.js";
@@ -18,6 +18,7 @@ import { buildObservationSignature, buildSceneMemoryPath, buildSceneRef, collect
 import { extractFrontmatterBlock, splitMarkdownSections } from "./parser.js";
 import { PersonaPaths } from "./paths.js";
 import { selectRelevantPersonaMemories } from "./selector.js";
+import { resolveReplyContext, type SessionLogEntry } from "../session-log.js";
 import { TokenService } from "../token-service.js";
 import type { DreamState, FormationRetryState, PersonaMemoryRuntimeState } from "./types.js";
 
@@ -156,7 +157,14 @@ export class PersonaMemoryService {
 		const paths = this.ensurePersonaLayout(agent.slug);
 		const sceneRef = buildSceneRef(session, event);
 		const path = paths.observationPath(sceneRef);
-		const line = `${formatObservationLine(event)}\n`;
+		const replyContext =
+			session && event.replyToMessageId
+				? resolveReplyContext(
+						readJsonLines<SessionLogEntry>(this.store.getSessionLogPath(agent.slug, session.sessionRecordId)),
+						event.replyToMessageId,
+					)
+				: undefined;
+		const line = `${formatObservationLine(event, replyContext)}\n`;
 		withFileLock(path, () => {
 			ensureParentDir(path);
 			appendFileSync(path, line, "utf-8");
@@ -829,6 +837,7 @@ export class PersonaMemoryService {
 	private buildSelectorMessageText(event: InboundMessageEvent): string {
 		return collectEventText(event)
 			.replace(/^- [A-Za-z]+:\s*/gm, "")
+			.replace(/^[A-Za-z]+:\s*/, "")
 			.trim();
 	}
 

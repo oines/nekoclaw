@@ -90,6 +90,10 @@ describe("OutboundDispatchService path rebasing", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mockStore.findSessionByAddress.mockReturnValue(undefined);
+		(mockPlugin.outbound.send as any).mockResolvedValue([]);
+		mockPluginActions.send.mockResolvedValue([]);
+		mockPluginActions.reply.mockResolvedValue([]);
+		mockNapcatPluginActions.send.mockResolvedValue([]);
 	});
 
 	it("rebases container paths to host paths in sendToSession", async () => {
@@ -103,6 +107,7 @@ describe("OutboundDispatchService path rebasing", () => {
 				},
 			],
 		};
+		(mockPlugin.outbound.send as any).mockResolvedValue([{ chatId: "123", messageId: "bot-1" }]);
 
 		await service.sendToSession(mockAgent, mockSession, {} as any, payload);
 
@@ -119,6 +124,7 @@ describe("OutboundDispatchService path rebasing", () => {
 				payload: expect.objectContaining({
 					text: "here is a file",
 				}),
+				messageIds: ["bot-1"],
 			}),
 		);
 	});
@@ -140,6 +146,8 @@ describe("OutboundDispatchService path rebasing", () => {
 				},
 			},
 		];
+		mockPluginActions.send.mockResolvedValue([{ chatId: "123", messageId: "m-send" }]);
+		mockPluginActions.reply.mockResolvedValue([{ chatId: "123", messageId: "m-reply" }]);
 
 		await service.executeToolActions(mockAgent, mockSession, actions);
 
@@ -162,13 +170,13 @@ describe("OutboundDispatchService path rebasing", () => {
 			1,
 			mockAgent.agentId,
 			mockSession.sessionRecordId,
-			expect.objectContaining({ type: "bot.outbound", source: "tool.send" }),
+			expect.objectContaining({ type: "bot.outbound", source: "tool.send", messageIds: ["m-send"] }),
 		);
 		expect(mockStore.services.sessions.appendSessionLog).toHaveBeenNthCalledWith(
 			2,
 			mockAgent.agentId,
 			mockSession.sessionRecordId,
-			expect.objectContaining({ type: "bot.outbound", source: "tool.reply" }),
+			expect.objectContaining({ type: "bot.outbound", source: "tool.reply", messageIds: ["m-reply"] }),
 		);
 	});
 
@@ -193,6 +201,7 @@ describe("OutboundDispatchService path rebasing", () => {
 				},
 			},
 		];
+		mockNapcatPluginActions.send.mockResolvedValue([{ chatId: "8888", messageId: "m-target" }]);
 
 		await service.executeToolActions(mockAgent, mockSession, actions);
 
@@ -213,6 +222,7 @@ describe("OutboundDispatchService path rebasing", () => {
 				source: "tool.send_targeted",
 				chatId: "8888",
 				chatKind: "group",
+				messageIds: ["m-target"],
 			}),
 		);
 	});

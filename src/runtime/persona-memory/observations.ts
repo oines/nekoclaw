@@ -3,6 +3,7 @@ import { summarizeBlocks } from "../../messages.js";
 import type { TokenCountResult } from "../token-service.js";
 import type { InboundMessageEvent, ReplyPayload, SessionRecord } from "../../types.js";
 import { FORMATION_MAX_WAIT_MS, FORMATION_MIN_OBSERVATION_LINES, SCENE_OBSERVATION_MAX_LINES, SCENE_OBSERVATION_TOKEN_BUDGET } from "./constants.js";
+import { buildReplyToClause, buildSpeakerLine, collapseSummaryLines, type ReplyContextSummary } from "../conversation-format.js";
 
 export type CountTextTokens = (value: string) => Promise<TokenCountResult>;
 
@@ -99,7 +100,7 @@ export function collectReplyText(payload: ReplyPayload | undefined): string {
 }
 
 export function collectEventText(event: InboundMessageEvent): string {
-	return summarizeBlocks(event.blocks).join("\n").trim();
+	return collapseSummaryLines(summarizeBlocks(event.blocks));
 }
 
 export function normalizeText(value: string | undefined): string {
@@ -110,15 +111,21 @@ function toExposedChannelType(channelType: string): string {
 	return channelType === "napcat" ? "qq" : channelType;
 }
 
-export function formatObservationLine(event: InboundMessageEvent): string {
+export function formatObservationLine(event: InboundMessageEvent, replyContext?: ReplyContextSummary): string {
 	const speaker = `${toExposedChannelType(event.channelType)}:${event.sender.externalId ?? event.chatId}`;
 	const displayName = event.sender.displayName ? ` ${event.sender.displayName}` : "";
 	const sceneLabel =
 		event.chatKind === "group" && event.chatTitle?.trim()
 			? ` | scene=${event.chatTitle.trim()}`
 			: "";
-	const content = collectEventText(event).replace(/\n+/g, " ").trim();
-	return `[${event.occurredAt}] ${speaker}${displayName}${sceneLabel}: ${content}`;
+	const content = collectEventText(event).trim();
+	if (!replyContext) {
+		return `[${event.occurredAt}] ${speaker}${displayName}${sceneLabel}: ${content}`;
+	}
+	return [
+		`[${event.occurredAt}] ${speaker}${displayName}${sceneLabel} ${buildReplyToClause(replyContext)}`,
+		buildSpeakerLine(event.sender.displayName, content),
+	].join("\n");
 }
 
 export function parseObservationTimestamp(line: string): number | undefined {

@@ -85,7 +85,7 @@ export class OutboundDispatchService {
 			throw new Error(`The ${channel.type} channel is not active for ${agent.slug}`);
 		}
 		const rebasedPayload = this.rebasePayload(agent, payload);
-		await plugin.outbound.send({
+		const refs = await plugin.outbound.send({
 			session,
 			payload: rebasedPayload,
 			event,
@@ -95,6 +95,7 @@ export class OutboundDispatchService {
 			payload,
 			source: "outbound",
 			chatTitle: event.chatTitle ?? session.chatTitle,
+			messageIds: refs.map((ref) => ref.messageId),
 		});
 		this.store.audit(agent.agentId, `${channel.type}.outbound`, {
 			sessionRecordId: session.sessionRecordId,
@@ -113,15 +114,17 @@ export class OutboundDispatchService {
 		for (const action of actions) {
 			switch (action.kind) {
 				case "send":
-					await plugin.actions.send({
-						chatId: session.externalConversationId,
-						chatKind: session.chatKind,
-						payload: this.rebasePayload(agent, action.payload),
-					});
 					this.appendBotOutboundLog(agent, {
 						session,
 						payload: action.payload,
 						source: "tool.send",
+						messageIds: (
+							await plugin.actions.send({
+								chatId: session.externalConversationId,
+								chatKind: session.chatKind,
+								payload: this.rebasePayload(agent, action.payload),
+							})
+						).map((ref) => ref.messageId),
 					});
 					break;
 				case "send_targeted": {
@@ -134,7 +137,7 @@ export class OutboundDispatchService {
 					if (!targetPlugin) {
 						throw new Error(`The ${target.channelType} channel is not active for ${agent.slug}`);
 					}
-					await targetPlugin.actions.send({
+					const refs = await targetPlugin.actions.send({
 						chatId: target.externalConversationId,
 						chatKind: target.chatKind,
 						payload: this.rebasePayload(agent, action.payload),
@@ -149,21 +152,24 @@ export class OutboundDispatchService {
 							session: targetSession,
 							payload: action.payload,
 							source: "tool.send_targeted",
+							messageIds: refs.map((ref) => ref.messageId),
 						});
 					}
 					break;
 				}
 				case "reply":
-					await plugin.actions.reply({
-						chatId: session.externalConversationId,
-						chatKind: session.chatKind,
-						payload: this.rebasePayload(agent, action.payload),
-						replyToId: action.replyToId ?? action.payload.replyToId ?? "",
-					});
 					this.appendBotOutboundLog(agent, {
 						session,
 						payload: action.payload,
 						source: "tool.reply",
+						messageIds: (
+							await plugin.actions.reply({
+								chatId: session.externalConversationId,
+								chatKind: session.chatKind,
+								payload: this.rebasePayload(agent, action.payload),
+								replyToId: action.replyToId ?? action.payload.replyToId ?? "",
+							})
+						).map((ref) => ref.messageId),
 					});
 					break;
 				case "edit":
@@ -215,6 +221,7 @@ export class OutboundDispatchService {
 			payload: ReplyPayload;
 			source: BotOutboundLogSource;
 			chatTitle?: string;
+			messageIds?: string[];
 		},
 	): void {
 		this.store.services.sessions.appendSessionLog(
@@ -231,6 +238,7 @@ export class OutboundDispatchService {
 				},
 				payload: input.payload,
 				source: input.source,
+				messageIds: input.messageIds,
 			}),
 		);
 	}

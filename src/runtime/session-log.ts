@@ -3,6 +3,7 @@ import { summarizeBlocks } from "../messages.js";
 import type { CountTextTokens } from "./persona-memory/observations.js";
 import type { ChatKind, ChannelType, InboundMessageEvent, ReplyPayload, SessionRecord } from "../types.js";
 import { FORMATION_TIMELINE_MAX_EVENTS, FORMATION_TIMELINE_TOKEN_BUDGET } from "./persona-memory/constants.js";
+import { buildSpeakerLine, buildSpeakerReplyLine, collapseSummaryLines, type ReplyContextSummary } from "./conversation-format.js";
 
 export type BotOutboundLogSource = "outbound" | "tool.reply" | "tool.send" | "tool.send_targeted";
 
@@ -25,6 +26,7 @@ export interface SessionBotOutboundLogEntry {
 		externalId: "__bot__";
 		displayName?: string;
 	};
+	messageIds: string[];
 	payload: ReplyPayload;
 	source: BotOutboundLogSource;
 }
@@ -61,6 +63,7 @@ export function buildBotOutboundSessionLogEntry(input: {
 	payload: ReplyPayload;
 	source: BotOutboundLogSource;
 	botDisplayName?: string;
+	messageIds?: string[];
 }): SessionBotOutboundLogEntry {
 	return {
 		timestamp: input.timestamp,
@@ -75,6 +78,7 @@ export function buildBotOutboundSessionLogEntry(input: {
 			externalId: "__bot__",
 			displayName: input.botDisplayName,
 		},
+		messageIds: input.messageIds ?? [],
 		payload: input.payload,
 		source: input.source,
 	};
@@ -90,6 +94,56 @@ export function isInboundSessionLogEntry(entry: SessionLogEntry | unknown): entr
 	}
 	const type = (entry as { type?: unknown }).type;
 	return type === "message.created" || type === "message.updated" || type === "message.deleted";
+}
+
+function summarizeInboundEntry(entry: SessionInboundLogEntry): string {
+	return collapseSummaryLines(summarizeBlocks(entry.blocks ?? []));
+}
+
+function summarizeBotEntry(entry: SessionBotOutboundLogEntry): string {
+	return collapseSummaryLines(summarizeReplyPayload(entry.payload));
+}
+
+function displayInboundSpeaker(entry: SessionInboundLogEntry): string {
+	return entry.sender.displayName?.trim() || `${toExposedChannelType(entry.channelType)}:${entry.sender.externalId ?? entry.chatId}`;
+}
+
+function displayBotSpeaker(entry: SessionBotOutboundLogEntry): string {
+	return entry.sender.displayName?.trim() || "Bot";
+}
+
+export function resolveReplyContext(logEntries: SessionLogEntry[], replyToMessageId?: string): ReplyContextSummary | undefined {
+	if (!replyToMessageId) {
+		return undefined;
+	}
+	for (let index = logEntries.length - 1; index >= 0; index -= 1) {
+		const entry = logEntries[index];
+		if (isInboundSessionLogEntry(entry) && entry.messageId === replyToMessageId) {
+			const summary = summarizeInboundEntry(entry);
+			if (!summary) {
+				return undefined;
+			}
+			return {
+				speakerName: displayInboundSpeaker(entry),
+				summary,
+			};
+		}
+		if (isBotOutboundSessionLogEntry(entry)) {
+			const messageIds = Array.isArray(entry.messageIds) ? entry.messageIds : [];
+			if (!messageIds.includes(replyToMessageId)) {
+				continue;
+			}
+			const summary = summarizeBotEntry(entry);
+			if (!summary) {
+				return undefined;
+			}
+			return {
+				speakerName: displayBotSpeaker(entry),
+				summary,
+			};
+		}
+	}
+	return undefined;
 }
 
 function isSameInboundEvent(entry: SessionInboundLogEntry, event: InboundMessageEvent): boolean {
@@ -198,7 +252,13 @@ export async function buildFormationTimeline(input: {
 		if (entry.type === "message.deleted" || isSlashCommandEntry(entry)) {
 			continue;
 		}
-		const lines = summarizeBlocks(entry.blocks ?? []);
+		const replyContext = resolveReplyContext(input.logEntries, entry.replyToMessageId);
+		const lines = replyContext
+			? [
+					buildSpeakerReplyLine(entry.sender.displayName, replyContext),
+					buildSpeakerLine(entry.sender.displayName, summarizeInboundEntry(entry)),
+				]
+			: summarizeBlocks(entry.blocks ?? []);
 		const speaker = isSameInboundEvent(entry, input.currentEvent) ? "User" : "Observed";
 		const turn = formatTimelineTurn(buildInboundHeader(entry, speaker), lines);
 		if (turn) {

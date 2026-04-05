@@ -9,6 +9,7 @@ function createEvent(input: {
 	chatId: string;
 	chatKind: "dm" | "group";
 	messageId: string;
+	replyToMessageId?: string;
 	senderId: string;
 	senderName: string;
 	text: string;
@@ -22,6 +23,7 @@ function createEvent(input: {
 		chatKind: input.chatKind,
 		chatTitle: input.chatTitle,
 		messageId: input.messageId,
+		replyToMessageId: input.replyToMessageId,
 		sender: { externalId: input.senderId, displayName: input.senderName },
 		blocks: [{ kind: "text", text: input.text }],
 		occurredAt: input.occurredAt,
@@ -162,6 +164,112 @@ describe("persona memory service", () => {
 		const observationPath = store.getPersonaObservationPath(agent.slug, "telegram-group-1001");
 		expect(readFileSync(observationPath, "utf-8")).toContain("scene=支付群");
 		expect(readFileSync(observationPath, "utf-8")).toContain("群里刚才在聊什么？");
+	});
+
+	it("includes reply target context in observations when replying to another user", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { buildInboundSessionLogEntry } = await import("../src/runtime/session-log.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "reply-observer-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "napcat",
+			externalConversationId: "1063820039",
+			chatKind: "group",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		store.appendSessionLog(
+			agent.agentId,
+			session.sessionRecordId,
+			buildInboundSessionLogEntry(
+				createEvent({
+					channelType: "napcat",
+					chatId: "1063820039",
+					chatKind: "group",
+					messageId: "100",
+					senderId: "200",
+					senderName: "B",
+					text: "数据库先别动",
+					occurredAt: "2026-04-01T00:00:00.000Z",
+					chatTitle: "技术群",
+				}),
+			),
+		);
+
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "napcat",
+				chatId: "1063820039",
+				chatKind: "group",
+				messageId: "101",
+				replyToMessageId: "100",
+				senderId: "123",
+				senderName: "A",
+				text: "不行，支付已经炸了",
+				occurredAt: "2026-04-01T00:01:00.000Z",
+				chatTitle: "技术群",
+			}),
+		);
+
+		const observationPath = store.getPersonaObservationPath(agent.slug, "napcat-group-1063820039");
+		const observation = readFileSync(observationPath, "utf-8");
+		expect(observation).toContain("[2026-04-01T00:01:00.000Z] qq:123 A | scene=技术群 reply_to B: Text: 数据库先别动");
+		expect(observation).toContain("A: Text: 不行，支付已经炸了");
+	});
+
+	it("includes reply target context in observations when replying to a bot message", async () => {
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { PersonaMemoryService } = await import("../src/runtime/persona-memory.js");
+		const { buildBotOutboundSessionLogEntry } = await import("../src/runtime/session-log.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "reply-bot-observer-cat" });
+		const session = store.createSession(agent.agentId, {
+			channelType: "telegram",
+			externalConversationId: "888",
+			chatKind: "dm",
+		});
+		const personaMemory = new PersonaMemoryService(store);
+		store.appendSessionLog(
+			agent.agentId,
+			session.sessionRecordId,
+			buildBotOutboundSessionLogEntry({
+				timestamp: "2026-04-01T00:00:00.000Z",
+				session: {
+					sessionRecordId: session.sessionRecordId,
+					channelType: "telegram",
+					externalConversationId: "888",
+					chatKind: "dm",
+				},
+				payload: { text: "我先不重启，等你确认" },
+				source: "outbound",
+				messageIds: ["bot-1"],
+			}),
+		);
+
+		personaMemory.recordInbound(
+			agent.agentId,
+			session,
+			createEvent({
+				channelType: "telegram",
+				chatId: "888",
+				chatKind: "dm",
+				messageId: "102",
+				replyToMessageId: "bot-1",
+				senderId: "123",
+				senderName: "A",
+				text: "那你现在总结一下",
+				occurredAt: "2026-04-01T00:01:00.000Z",
+			}),
+		);
+
+		const observationPath = store.getPersonaObservationPath(agent.slug, "telegram-dm-888");
+		const observation = readFileSync(observationPath, "utf-8");
+		expect(observation).toContain("[2026-04-01T00:01:00.000Z] telegram:123 A reply_to Bot: Text: 我先不重启，等你确认");
+		expect(observation).toContain("A: Text: 那你现在总结一下");
 	});
 
 	it("calls the selector with only sender, message, and manifest, then preloads the selected memory files", async () => {

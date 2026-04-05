@@ -11,6 +11,7 @@ function createEvent(input: {
 	chatId: string;
 	chatKind: "dm" | "group";
 	messageId: string;
+	replyToMessageId?: string;
 	senderId: string;
 	senderName?: string;
 	text: string;
@@ -24,6 +25,7 @@ function createEvent(input: {
 		chatKind: input.chatKind,
 		chatTitle: input.chatTitle,
 		messageId: input.messageId,
+		replyToMessageId: input.replyToMessageId,
 		sender: { externalId: input.senderId, displayName: input.senderName },
 		blocks: [{ kind: "text", text: input.text }],
 		occurredAt: input.occurredAt,
@@ -211,5 +213,89 @@ describe("buildFormationTurnTranscript", () => {
 		expect(transcript).toContain("source=current_run_fallback");
 		expect(transcript).not.toContain("/help");
 		expect(transcript).not.toContain("other room");
+	});
+
+	it("includes reply context in the formation timeline for both human and bot targets", async () => {
+		const { buildFormationTurnTranscript } = await import("../src/runtime/worker-runner.js");
+
+		const logPath = join(tempDir, "reply-log.jsonl");
+		appendJsonLine(
+			logPath,
+			buildInboundSessionLogEntry(
+				createEvent({
+					channelType: "telegram",
+					chatId: "111",
+					chatKind: "dm",
+					messageId: "m0",
+					senderId: "u2",
+					senderName: "Bob",
+					text: "数据库先别动",
+					occurredAt: "2026-04-04T00:00:00.000Z",
+				}),
+			),
+		);
+		appendJsonLine(
+			logPath,
+			buildBotOutboundSessionLogEntry({
+				timestamp: "2026-04-04T00:00:01.000Z",
+				session: {
+					sessionRecordId: "session-1",
+					channelType: "telegram",
+					externalConversationId: "111",
+					chatKind: "dm",
+				},
+				payload: { text: "我先不重启，等你确认" },
+				source: "outbound",
+				messageIds: ["bot-1"],
+			}),
+		);
+		appendJsonLine(
+			logPath,
+			buildInboundSessionLogEntry(
+				createEvent({
+					channelType: "telegram",
+					chatId: "111",
+					chatKind: "dm",
+					messageId: "m1",
+					replyToMessageId: "m0",
+					senderId: "u1",
+					senderName: "Alice",
+					text: "不行，支付已经炸了",
+					occurredAt: "2026-04-04T00:00:02.000Z",
+				}),
+			),
+		);
+		const currentEvent = createEvent({
+			channelType: "telegram",
+			chatId: "111",
+			chatKind: "dm",
+			messageId: "m2",
+			replyToMessageId: "bot-1",
+			senderId: "u1",
+			senderName: "Alice",
+			text: "那你现在总结一下",
+			occurredAt: "2026-04-04T00:00:03.000Z",
+		});
+		appendJsonLine(logPath, buildInboundSessionLogEntry(currentEvent));
+
+		const transcript = await buildFormationTurnTranscript(
+			{
+				getSessionLogPath: () => logPath,
+			} as any,
+			{ slug: "timeline-cat" } as any,
+			{ event: currentEvent },
+			{
+				sessionRecordId: "session-1",
+				channelType: "telegram",
+				chatKind: "dm",
+				externalConversationId: "111",
+			},
+			{ outbound: {} },
+		);
+
+		expect(transcript).toContain("Alice reply_to Bob: Text: 数据库先别动");
+		expect(transcript).toContain("Alice: Text: 不行，支付已经炸了");
+		expect(transcript).toContain("Alice reply_to Bot: Text: 我先不重启，等你确认");
+		expect(transcript).toContain("Alice: Text: 那你现在总结一下");
 	});
 });
