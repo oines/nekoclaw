@@ -42,6 +42,13 @@ function normalizeSectionText(value: string): string {
 	return value.replace(/\s+/g, " ").trim();
 }
 
+function truncateText(value: string, maxLength: number): string {
+	if (value.length <= maxLength) {
+		return value;
+	}
+	return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
 function renderFrontmatterBlock(rawMarkdown: string): string {
 	const normalized = rawMarkdown.replace(/\r\n/g, "\n");
 	if (!normalized.startsWith("---\n")) {
@@ -550,6 +557,13 @@ export class PersonaMemoryService {
 			...input,
 			agent,
 			effectiveModel,
+			onFinalizeMissing: ({ mode, attempt, lastAssistantText }) => {
+				this.store.audit(agent.agentId, "persona.maintenance_finalize_missing_retry", {
+					mode,
+					attempt,
+					lastAssistantText: lastAssistantText ? truncateText(lastAssistantText, 400) : undefined,
+				});
+			},
 		});
 	}
 

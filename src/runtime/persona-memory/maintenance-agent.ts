@@ -14,6 +14,7 @@ import {
 	SettingsManager,
 	type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
+import type { AssistantMessage, Message } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { readTextFile, writeTextFile } from "../../store/fs.js";
 import { MAINTENANCE_TIMEOUT_MS } from "./constants.js";
@@ -31,6 +32,8 @@ const DeleteMemoryFileSchema = Type.Object({
 	path: Type.String({ description: "Relative path under memory/people or memory/scenes to delete." }),
 });
 
+const MAX_FINALIZE_RECOVERY_ATTEMPTS = 3;
+
 function isAllowedMemoryPath(value: string): boolean {
 	return !value.includes("..") && (value.startsWith("memory/people/") || value.startsWith("memory/scenes/")) && value.endsWith(".md");
 }
@@ -45,6 +48,13 @@ function isObservationPath(value: string): boolean {
 
 function normalizeText(value: string | undefined): string {
 	return value?.trim() || "";
+}
+
+function truncateText(value: string, maxLength: number): string {
+	if (value.length <= maxLength) {
+		return value;
+	}
+	return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 function safeJoinPersonaPath(personaDir: string, relativePath: string): string {
@@ -102,6 +112,44 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 				reject(error);
 			});
 	});
+}
+
+function getMostRecentAssistantText(messages: Message[] | undefined): string {
+	if (!Array.isArray(messages) || messages.length === 0) {
+		return "";
+	}
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (!message || message.role !== "assistant") {
+			continue;
+		}
+		const text = (message as AssistantMessage).content
+			.filter((content) => content.type === "text")
+			.map((content) => content.text)
+			.join("\n")
+			.trim();
+		if (text) {
+			return text;
+		}
+	}
+	return "";
+}
+
+function buildFinalizeRecoveryPrompt(
+	mode: "formation" | "dream",
+	attempt: number,
+	lastAssistantText: string,
+): string {
+	const lines = [
+		`Your previous turn ended without calling persona_finalize. This is recovery attempt ${attempt} of ${MAX_FINALIZE_RECOVERY_ATTEMPTS}.`,
+		lastAssistantText ? `Your last plain-text output was:\n${truncateText(lastAssistantText, 600)}` : undefined,
+		"If you are not finished, continue using the tools and complete the remaining edits now.",
+		mode === "dream"
+			? "If you are already finished, call persona_finalize exactly once right now with consumeObservationLines=0."
+			: "If you are already finished, call persona_finalize exactly once right now with the correct consumeObservationLines value. If nothing changed, use consumeObservationLines=0.",
+		"Do not reply with plain text only. Either keep working with tools or call persona_finalize now.",
+	];
+	return lines.filter((line): line is string => Boolean(line)).join("\n");
 }
 
 export function createMaintenanceClone(paths: PersonaPaths): { tempRoot: string; tempPersonaDir: string; livePersonaDir: string } {
@@ -163,6 +211,7 @@ export async function executeMaintenanceSession(input: {
 				apiKey?: string;
 		  }
 		| undefined;
+	onFinalizeMissing?: (details: { mode: "formation" | "dream"; attempt: number; lastAssistantText: string }) => void;
 }): Promise<MaintenanceExecutionResult> {
 	const modelConfig = input.resolveModel(input.agent, input.effectiveModel);
 	if (!modelConfig) {
@@ -336,10 +385,36 @@ export async function executeMaintenanceSession(input: {
 		resourceLoader,
 		model: modelConfig.model,
 		thinkingLevel: input.effectiveModel?.thinkingLevel ?? input.agent.thinkingLevel,
-		tools: [],
-		customTools,
-	});
-	await withTimeout(session.prompt(input.prompt), MAINTENANCE_TIMEOUT_MS, `Persona maintenance timed out after ${MAINTENANCE_TIMEOUT_MS}ms.`);
+			tools: [],
+			customTools,
+		});
+	const deadline = Date.now() + MAINTENANCE_TIMEOUT_MS;
+	let prompt = input.prompt;
+	let recoveryAttempts = 0;
+	while (true) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			throw new Error(`Persona maintenance timed out after ${MAINTENANCE_TIMEOUT_MS}ms.`);
+		}
+		await withTimeout(session.prompt(prompt), remainingMs, `Persona maintenance timed out after ${MAINTENANCE_TIMEOUT_MS}ms.`);
+		if (finalizeCount === 1 && finalize) {
+			break;
+		}
+		if (finalizeCount > 1) {
+			throw new Error(`persona_finalize must be called exactly once; saw ${finalizeCount}.`);
+		}
+		if (recoveryAttempts >= MAX_FINALIZE_RECOVERY_ATTEMPTS) {
+			break;
+		}
+		recoveryAttempts += 1;
+		const lastAssistantText = getMostRecentAssistantText(session.state.messages as Message[] | undefined);
+		input.onFinalizeMissing?.({
+			mode: input.mode,
+			attempt: recoveryAttempts,
+			lastAssistantText,
+		});
+		prompt = buildFinalizeRecoveryPrompt(input.mode, recoveryAttempts, lastAssistantText);
+	}
 	if (finalizeCount !== 1 || !finalize) {
 		throw new Error(`persona_finalize must be called exactly once; saw ${finalizeCount}.`);
 	}

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +95,206 @@ describe("persona memory service", () => {
 		const { MAINTENANCE_TIMEOUT_MS } = await import("../src/runtime/persona-memory/constants.js");
 
 		expect(MAINTENANCE_TIMEOUT_MS).toBe(600_000);
+	});
+
+	it("retries missing persona_finalize up to three times and recovers within the same dream session", async () => {
+		const prompts: string[] = [];
+		const finalizeRetries: Array<{ mode: string; attempt: number; lastAssistantText: string }> = [];
+
+		vi.doMock("@mariozechner/pi-coding-agent", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-coding-agent")>("@mariozechner/pi-coding-agent");
+			return {
+				...actual,
+				createAgentSession: vi.fn(async (config: { customTools: Array<{ name: string; execute: (...args: any[]) => Promise<unknown> }> }) => {
+					const sessionState = { messages: [] as Array<Record<string, unknown>> };
+					let promptCount = 0;
+					return {
+						session: {
+							state: sessionState,
+							prompt: vi.fn(async (text: string) => {
+								prompts.push(text);
+								promptCount += 1;
+								if (promptCount <= 3) {
+									sessionState.messages.push({
+										role: "assistant",
+										content: [{ type: "text", text: `plain explanation ${promptCount}` }],
+										timestamp: Date.now(),
+									});
+									return;
+								}
+								const finalizeTool = config.customTools.find((tool) => tool.name === "persona_finalize");
+								if (!finalizeTool) {
+									throw new Error("missing persona_finalize tool");
+								}
+								await finalizeTool.execute("finalize-ok", {
+									consumeObservationLines: 9,
+									summary: "dream done",
+								});
+								sessionState.messages.push({
+									role: "assistant",
+									content: [{ type: "text", text: "finalized after retries" }],
+									timestamp: Date.now(),
+								});
+							}),
+						},
+					};
+				}),
+			};
+		});
+
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { executeMaintenanceSession } = await import("../src/runtime/persona-memory/maintenance-agent.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "maintenance-retry-cat" });
+		const tempPersonaDir = join(tempHome, "maintenance-retry-persona");
+		mkdirSync(join(tempPersonaDir, "memory/people"), { recursive: true });
+		mkdirSync(join(tempPersonaDir, "memory/scenes"), { recursive: true });
+		mkdirSync(join(tempPersonaDir, "observations"), { recursive: true });
+		writeFileSync(join(tempPersonaDir, "index.md"), "");
+
+		const result = await executeMaintenanceSession({
+			agent,
+			effectiveModel: undefined,
+			tempPersonaDir,
+			mode: "dream",
+			prompt: "initial dream prompt",
+			maxConsumeObservationLines: 25,
+			allowDeletes: true,
+			resolveModel: () => ({ model: { id: "fake", provider: "openai" } as never, apiKey: "test-key" }),
+			onFinalizeMissing: (details) => {
+				finalizeRetries.push(details);
+			},
+		});
+
+		expect(result.finalize.consumeObservationLines).toBe(0);
+		expect(result.finalize.summary).toBe("dream done");
+		expect(prompts).toHaveLength(4);
+		expect(prompts[1]).toContain("recovery attempt 1 of 3");
+		expect(prompts[3]).toContain("consumeObservationLines=0");
+		expect(prompts[3]).toContain("Do not reply with plain text only.");
+		expect(finalizeRetries).toEqual([
+			{ mode: "dream", attempt: 1, lastAssistantText: "plain explanation 1" },
+			{ mode: "dream", attempt: 2, lastAssistantText: "plain explanation 2" },
+			{ mode: "dream", attempt: 3, lastAssistantText: "plain explanation 3" },
+		]);
+	});
+
+	it("fails after three finalize recovery attempts if formation still never finalizes", async () => {
+		const prompts: string[] = [];
+		const finalizeRetries: Array<{ mode: string; attempt: number; lastAssistantText: string }> = [];
+
+		vi.doMock("@mariozechner/pi-coding-agent", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-coding-agent")>("@mariozechner/pi-coding-agent");
+			return {
+				...actual,
+				createAgentSession: vi.fn(async () => {
+					const sessionState = { messages: [] as Array<Record<string, unknown>> };
+					return {
+						session: {
+							state: sessionState,
+							prompt: vi.fn(async (text: string) => {
+								prompts.push(text);
+								sessionState.messages.push({
+									role: "assistant",
+									content: [{ type: "text", text: `still talking ${prompts.length}` }],
+									timestamp: Date.now(),
+								});
+							}),
+						},
+					};
+				}),
+			};
+		});
+
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { executeMaintenanceSession } = await import("../src/runtime/persona-memory/maintenance-agent.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "maintenance-fail-cat" });
+		const tempPersonaDir = join(tempHome, "maintenance-fail-persona");
+		mkdirSync(join(tempPersonaDir, "memory/people"), { recursive: true });
+		mkdirSync(join(tempPersonaDir, "memory/scenes"), { recursive: true });
+		mkdirSync(join(tempPersonaDir, "observations"), { recursive: true });
+		writeFileSync(join(tempPersonaDir, "index.md"), "");
+
+		await expect(
+			executeMaintenanceSession({
+				agent,
+				effectiveModel: undefined,
+				tempPersonaDir,
+				mode: "formation",
+				prompt: "initial formation prompt",
+				maxConsumeObservationLines: 12,
+				allowDeletes: false,
+				resolveModel: () => ({ model: { id: "fake", provider: "openai" } as never, apiKey: "test-key" }),
+				onFinalizeMissing: (details) => {
+					finalizeRetries.push(details);
+				},
+			}),
+		).rejects.toThrow("persona_finalize must be called exactly once; saw 0.");
+
+		expect(prompts).toHaveLength(4);
+		expect(prompts[1]).toContain("correct consumeObservationLines value");
+		expect(prompts[1]).toContain("If nothing changed, use consumeObservationLines=0.");
+		expect(finalizeRetries).toEqual([
+			{ mode: "formation", attempt: 1, lastAssistantText: "still talking 1" },
+			{ mode: "formation", attempt: 2, lastAssistantText: "still talking 2" },
+			{ mode: "formation", attempt: 3, lastAssistantText: "still talking 3" },
+		]);
+	});
+
+	it("does not retry when persona_finalize is called more than once in the same run", async () => {
+		const finalizeRetries: Array<{ mode: string; attempt: number; lastAssistantText: string }> = [];
+
+		vi.doMock("@mariozechner/pi-coding-agent", async () => {
+			const actual = await vi.importActual<typeof import("@mariozechner/pi-coding-agent")>("@mariozechner/pi-coding-agent");
+			return {
+				...actual,
+				createAgentSession: vi.fn(async (config: { customTools: Array<{ name: string; execute: (...args: any[]) => Promise<unknown> }> }) => ({
+					session: {
+						state: { messages: [] as Array<Record<string, unknown>> },
+						prompt: vi.fn(async () => {
+							const finalizeTool = config.customTools.find((tool) => tool.name === "persona_finalize");
+							if (!finalizeTool) {
+								throw new Error("missing persona_finalize tool");
+							}
+							await finalizeTool.execute("finalize-1", { consumeObservationLines: 1, summary: "first" });
+							await finalizeTool.execute("finalize-2", { consumeObservationLines: 1, summary: "second" });
+						}),
+					},
+				})),
+			};
+		});
+
+		const { JsonNekoclawStore } = await import("../src/store/json-store.js");
+		const { executeMaintenanceSession } = await import("../src/runtime/persona-memory/maintenance-agent.js");
+
+		const store = new JsonNekoclawStore();
+		const agent = store.createAgent({ slug: "maintenance-duplicate-finalize-cat" });
+		const tempPersonaDir = join(tempHome, "maintenance-duplicate-finalize-persona");
+		mkdirSync(join(tempPersonaDir, "memory/people"), { recursive: true });
+		mkdirSync(join(tempPersonaDir, "memory/scenes"), { recursive: true });
+		mkdirSync(join(tempPersonaDir, "observations"), { recursive: true });
+		writeFileSync(join(tempPersonaDir, "index.md"), "");
+
+		await expect(
+			executeMaintenanceSession({
+				agent,
+				effectiveModel: undefined,
+				tempPersonaDir,
+				mode: "formation",
+				prompt: "initial formation prompt",
+				maxConsumeObservationLines: 12,
+				allowDeletes: false,
+				resolveModel: () => ({ model: { id: "fake", provider: "openai" } as never, apiKey: "test-key" }),
+				onFinalizeMissing: (details) => {
+					finalizeRetries.push(details);
+				},
+			}),
+		).rejects.toThrow("persona_finalize may only be called once.");
+
+		expect(finalizeRetries).toEqual([]);
 	});
 
 	it("appends scene observations and exposes the latest scene window in prepared context", async () => {
